@@ -1,4 +1,5 @@
 'use client'
+export const dynamic = 'force-dynamic'
 import { useEffect, useState, useCallback } from 'react'
 import { supabase, TrainingLocation, Store, DifficultyLevel } from '@/lib/supabase'
 import { MapPin, Plus, Pencil, ToggleLeft, ToggleRight, Clock } from 'lucide-react'

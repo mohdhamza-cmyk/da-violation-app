@@ -1,4 +1,5 @@
 'use client'
+export const dynamic = 'force-dynamic'
 import { useEffect, useState, useCallback } from 'react'
 import { supabase, Store } from '@/lib/supabase'
 import { Store as StoreIcon, Plus, Pencil, ToggleLeft, ToggleRight, MapPin } from 'lucide-react'

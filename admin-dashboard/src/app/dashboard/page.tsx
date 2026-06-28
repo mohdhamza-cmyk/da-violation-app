@@ -1,4 +1,5 @@
 'use client'
+export const dynamic = 'force-dynamic'
 import { useEffect, useState, useCallback } from 'react'
 import { supabase, ActiveOrder, SessionStatus } from '@/lib/supabase'
 import { formatDistanceToNow } from 'date-fns'
