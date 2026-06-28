@@ -116,7 +116,7 @@ export default function ReportsPage() {
   ]
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="p-4 md:p-6 space-y-6">
       <div>
         <h1 className="text-2xl font-bold text-gray-900">Reports & Export</h1>
         <p className="text-gray-500 text-sm mt-0.5">Generate and download CSV reports</p>
@@ -125,7 +125,7 @@ export default function ReportsPage() {
       {/* Filters */}
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
         <h2 className="section-title mb-4 flex items-center gap-2"><Filter className="w-4 h-4" /> Report Filters</h2>
-        <div className="grid grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <div>
             <label className="block text-xs font-medium text-gray-600 mb-1">From Date</label>
             <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)} className="input-field" />

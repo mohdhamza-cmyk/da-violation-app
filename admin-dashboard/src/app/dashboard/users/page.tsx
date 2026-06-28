@@ -110,22 +110,25 @@ export default function UsersPage() {
         </div>
       </div>
 
-      <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm">
         {loading ? (
           <div className="p-12 text-center text-gray-400">Loading…</div>
         ) : users.length === 0 ? (
-          <div className="p-12 text-center">
+          <div className="p-12 text-center rounded-xl overflow-hidden">
             <Users className="w-10 h-10 text-gray-300 mx-auto mb-3" />
             <p className="text-gray-500">No staff users yet</p>
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm min-w-[600px]">
+          <div className="overflow-x-auto rounded-xl">
+            <table className="w-full text-sm">
               <thead>
                 <tr className="bg-gray-50">
-                  {['Name', 'Employee ID', 'Role', 'Phone', 'Status', ''].map(h => (
-                    <th key={h} className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">{h}</th>
-                  ))}
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Name</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide hidden sm:table-cell">Employee ID</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Role</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide hidden md:table-cell">Phone</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Status</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide"></th>
                 </tr>
               </thead>
               <tbody>
@@ -139,13 +142,13 @@ export default function UsersPage() {
                         <p className="font-medium text-gray-900">{user.full_name}</p>
                       </div>
                     </td>
-                    <td className="px-4 py-3 font-mono text-gray-600">{user.employee_id}</td>
+                    <td className="px-4 py-3 font-mono text-gray-600 hidden sm:table-cell">{user.employee_id}</td>
                     <td className="px-4 py-3">
                       <span className={`badge ${ROLE_BADGE[user.role] ?? 'bg-gray-100 text-gray-600'}`}>
                         {roleLabel(user.role)}
                       </span>
                     </td>
-                    <td className="px-4 py-3 text-gray-500">{user.phone ?? '—'}</td>
+                    <td className="px-4 py-3 text-gray-500 hidden md:table-cell">{user.phone ?? '—'}</td>
                     <td className="px-4 py-3">
                       <span className={`badge ${user.is_active ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>
                         {user.is_active ? 'Active' : 'Inactive'}

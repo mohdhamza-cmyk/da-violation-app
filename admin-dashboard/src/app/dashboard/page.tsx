@@ -79,27 +79,27 @@ export default function LiveDashboard() {
   }, [loadData])
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="p-4 md:p-6 space-y-6">
       <div>
         <h1 className="text-2xl font-bold text-gray-900">Live Dashboard</h1>
         <p className="text-gray-500 text-sm mt-0.5">Real-time training order monitoring · Auto-refreshes every 15s</p>
       </div>
 
       {/* Stats */}
-      <div className="grid grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4">
         {[
           { label: 'Active Orders', value: stats.active, icon: Activity, color: 'text-blue-600 bg-blue-50' },
           { label: 'Completed Today', value: stats.completed, icon: CheckCircle, color: 'text-green-600 bg-green-50' },
           { label: 'Active Riders', value: stats.riders, icon: Users, color: 'text-purple-600 bg-purple-50' },
           { label: 'Avg Score Today', value: stats.avgScore ? `${stats.avgScore}%` : '—', icon: Clock, color: 'text-orange-600 bg-orange-50' },
         ].map(({ label, value, icon: Icon, color }) => (
-          <div key={label} className="stat-card flex items-center gap-4">
-            <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${color}`}>
-              <Icon className="w-6 h-6" />
+          <div key={label} className="stat-card flex items-center gap-3">
+            <div className={`w-10 h-10 md:w-12 md:h-12 rounded-xl flex items-center justify-center flex-shrink-0 ${color}`}>
+              <Icon className="w-5 h-5 md:w-6 md:h-6" />
             </div>
-            <div>
-              <p className="text-2xl font-bold text-gray-900">{value}</p>
-              <p className="text-xs text-gray-500">{label}</p>
+            <div className="min-w-0">
+              <p className="text-xl md:text-2xl font-bold text-gray-900">{value}</p>
+              <p className="text-xs text-gray-500 leading-tight">{label}</p>
             </div>
           </div>
         ))}
