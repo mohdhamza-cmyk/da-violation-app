@@ -2,16 +2,16 @@
 export const dynamic = 'force-dynamic'
 import { useEffect, useState, useCallback } from 'react'
 import { supabase, Profile, Store, RiderPerformance } from '@/lib/supabase'
-import { Users, Search, Plus, ChevronRight, Star } from 'lucide-react'
+import { Users, Search, Plus, ChevronRight } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { formatDistanceToNow } from 'date-fns'
+import BulkUpload from '@/components/BulkUpload'
 
 export default function RidersPage() {
   const [riders, setRiders] = useState<RiderPerformance[]>([])
   const [stores, setStores] = useState<Store[]>([])
   const [search, setSearch] = useState('')
   const [loading, setLoading] = useState(true)
-  const [selectedRider, setSelectedRider] = useState<(Profile & { sessions?: { score?: number; status: string; created_at: string }[] }) | null>(null)
   const [showAssign, setShowAssign] = useState<Profile | null>(null)
   const [assignStore, setAssignStore] = useState('')
   const [showCreate, setShowCreate] = useState(false)
@@ -50,18 +50,35 @@ export default function RidersPage() {
     const { data, error } = await supabase.auth.signUp({
       email: newRider.email,
       password: newRider.password,
-      options: {
-        data: { full_name: newRider.full_name, employee_id: newRider.employee_id, role: 'rider' }
-      }
+      options: { data: { full_name: newRider.full_name, employee_id: newRider.employee_id, role: 'rider' } }
     })
     if (error || !data.user) { toast.error(error?.message ?? 'Failed'); return }
-    if (newRider.phone) {
-      await supabase.from('profiles').update({ phone: newRider.phone }).eq('id', data.user.id)
-    }
+    if (newRider.phone) await supabase.from('profiles').update({ phone: newRider.phone }).eq('id', data.user.id)
     toast.success('Rider created')
     setShowCreate(false)
     setNewRider({ full_name: '', employee_id: '', phone: '', email: '', password: '' })
     loadData()
+  }
+
+  async function handleBulkUpload(rows: Record<string, string>[]) {
+    let success = 0
+    const errors: string[] = []
+    for (const row of rows) {
+      if (!row.email || !row.password || !row.full_name || !row.employee_id) {
+        errors.push(`Row missing required fields: ${row.email || '(no email)'}`)
+        continue
+      }
+      const { data, error } = await supabase.auth.signUp({
+        email: row.email.trim(),
+        password: row.password.trim(),
+        options: { data: { full_name: row.full_name, employee_id: row.employee_id, role: 'rider' } }
+      })
+      if (error || !data.user) { errors.push(`${row.email}: ${error?.message ?? 'Failed'}`); continue }
+      if (row.phone) await supabase.from('profiles').update({ phone: row.phone }).eq('id', data.user.id)
+      success++
+    }
+    loadData()
+    return { success, errors }
   }
 
   const scoreColor = (score?: number) => {
@@ -72,15 +89,26 @@ export default function RidersPage() {
   }
 
   return (
-    <div className="p-6 space-y-6">
-      <div className="flex items-center justify-between">
+    <div className="p-4 md:p-6 space-y-6">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Riders</h1>
           <p className="text-gray-500 text-sm mt-0.5">{riders.length} riders registered</p>
         </div>
-        <button onClick={() => setShowCreate(true)} className="btn-primary flex items-center gap-2">
-          <Plus className="w-4 h-4" /> Add Rider
-        </button>
+        <div className="flex gap-2">
+          <BulkUpload
+            label="Riders"
+            templateHeaders={['full_name', 'employee_id', 'email', 'password', 'phone']}
+            templateExample={[
+              { full_name: 'Mohammed Hassan', employee_id: 'RDR-001', email: 'rider1@company.com', password: 'Pass@123', phone: '+971501234567' },
+              { full_name: 'Ali Ahmed', employee_id: 'RDR-002', email: 'rider2@company.com', password: 'Pass@123', phone: '+971509876543' },
+            ]}
+            onUpload={handleBulkUpload}
+          />
+          <button onClick={() => setShowCreate(true)} className="btn-primary flex items-center gap-2">
+            <Plus className="w-4 h-4" /> Add Rider
+          </button>
+        </div>
       </div>
 
       {/* Search */}
@@ -100,65 +128,65 @@ export default function RidersPage() {
             <p className="text-gray-500">No riders found</p>
           </div>
         ) : (
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="bg-gray-50 text-left">
-                {['Rider', 'Store', 'Sessions', 'Avg Score', 'Passed', 'Last Active', ''].map(h => (
-                  <th key={h} className="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map(rider => (
-                <tr key={rider.rider_id} className="table-row">
-                  <td className="px-4 py-3">
-                    <div className="flex items-center gap-3">
-                      <div className="w-8 h-8 bg-blue-100 rounded-full flex items-center justify-center text-blue-700 font-bold text-sm">
-                        {rider.full_name[0]}
-                      </div>
-                      <div>
-                        <p className="font-medium text-gray-900">{rider.full_name}</p>
-                        <p className="text-xs text-gray-400">{rider.employee_id}</p>
-                      </div>
-                    </div>
-                  </td>
-                  <td className="px-4 py-3 text-gray-700">{rider.current_store ?? <span className="text-gray-400 italic">Unassigned</span>}</td>
-                  <td className="px-4 py-3">
-                    <span className="font-medium">{rider.completed_sessions}</span>
-                    <span className="text-gray-400">/{rider.total_sessions}</span>
-                  </td>
-                  <td className="px-4 py-3">
-                    <span className={`font-bold ${scoreColor(rider.avg_score)}`}>
-                      {rider.avg_score != null ? `${rider.avg_score}%` : '—'}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3">
-                    <span className={`badge ${rider.passed_sessions > 0 ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>
-                      {rider.passed_sessions} passed
-                    </span>
-                  </td>
-                  <td className="px-4 py-3 text-gray-400 text-xs">
-                    {rider.last_session_at
-                      ? formatDistanceToNow(new Date(rider.last_session_at), { addSuffix: true })
-                      : 'Never'}
-                  </td>
-                  <td className="px-4 py-3">
-                    <div className="flex gap-2">
-                      <button onClick={() => setShowAssign(rider as unknown as Profile)}
-                        className="text-xs text-blue-600 hover:underline">Assign Store</button>
-                      <ChevronRight className="w-4 h-4 text-gray-300" />
-                    </div>
-                  </td>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm min-w-[640px]">
+              <thead>
+                <tr className="bg-gray-50 text-left">
+                  {['Rider', 'Store', 'Sessions', 'Avg Score', 'Passed', 'Last Active', ''].map(h => (
+                    <th key={h} className="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">{h}</th>
+                  ))}
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {filtered.map(rider => (
+                  <tr key={rider.rider_id} className="table-row">
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-3">
+                        <div className="w-8 h-8 bg-blue-100 rounded-full flex items-center justify-center text-blue-700 font-bold text-sm flex-shrink-0">
+                          {rider.full_name[0]}
+                        </div>
+                        <div>
+                          <p className="font-medium text-gray-900">{rider.full_name}</p>
+                          <p className="text-xs text-gray-400">{rider.employee_id}</p>
+                        </div>
+                      </div>
+                    </td>
+                    <td className="px-4 py-3 text-gray-700">{rider.current_store ?? <span className="text-gray-400 italic">Unassigned</span>}</td>
+                    <td className="px-4 py-3">
+                      <span className="font-medium">{rider.completed_sessions}</span>
+                      <span className="text-gray-400">/{rider.total_sessions}</span>
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className={`font-bold ${scoreColor(rider.avg_score)}`}>
+                        {rider.avg_score != null ? `${rider.avg_score}%` : '—'}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className={`badge ${rider.passed_sessions > 0 ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>
+                        {rider.passed_sessions} passed
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 text-gray-400 text-xs whitespace-nowrap">
+                      {rider.last_session_at ? formatDistanceToNow(new Date(rider.last_session_at), { addSuffix: true }) : 'Never'}
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="flex gap-2 items-center">
+                        <button onClick={() => setShowAssign(rider as unknown as Profile)}
+                          className="text-xs text-blue-600 hover:underline whitespace-nowrap">Assign Store</button>
+                        <ChevronRight className="w-4 h-4 text-gray-300" />
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
 
       {/* Assign Store Modal */}
       {showAssign && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-xl shadow-xl p-6 w-full max-w-sm">
             <h2 className="font-semibold text-gray-900 mb-4">Assign Store — {showAssign.full_name}</h2>
             <select value={assignStore} onChange={e => setAssignStore(e.target.value)} className="input-field mb-4">
@@ -175,7 +203,7 @@ export default function RidersPage() {
 
       {/* Create Rider Modal */}
       {showCreate && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-xl shadow-xl p-6 w-full max-w-sm space-y-3">
             <h2 className="font-semibold text-gray-900 mb-2">Add New Rider</h2>
             {[

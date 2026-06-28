@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { supabase, Store } from '@/lib/supabase'
 import { Store as StoreIcon, Plus, Pencil, ToggleLeft, ToggleRight, MapPin } from 'lucide-react'
 import toast from 'react-hot-toast'
+import BulkUpload from '@/components/BulkUpload'
 
 const EMPTY_STORE: Partial<Store> = { store_code: '', name: '', latitude: 0, longitude: 0, address: '', city: '', is_active: true }
 
@@ -46,16 +47,51 @@ export default function StoresPage() {
     loadStores()
   }
 
+  async function handleBulkUpload(rows: Record<string, string>[]) {
+    let success = 0
+    const errors: string[] = []
+    for (const row of rows) {
+      if (!row.store_code || !row.name || !row.latitude || !row.longitude) {
+        errors.push(`Row missing required fields: ${row.name || row.store_code || '(unknown)'}`)
+        continue
+      }
+      const { error } = await supabase.from('stores').insert({
+        store_code: row.store_code.trim(),
+        name: row.name.trim(),
+        latitude: parseFloat(row.latitude),
+        longitude: parseFloat(row.longitude),
+        address: row.address?.trim() || null,
+        city: row.city?.trim() || null,
+        is_active: true,
+      })
+      if (error) { errors.push(`${row.name}: ${error.message}`); continue }
+      success++
+    }
+    loadStores()
+    return { success, errors }
+  }
+
   return (
-    <div className="p-6 space-y-6">
-      <div className="flex items-center justify-between">
+    <div className="p-4 md:p-6 space-y-6">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Dark Stores</h1>
           <p className="text-gray-500 text-sm mt-0.5">{stores.length} stores configured</p>
         </div>
-        <button onClick={() => { setEditing({ ...EMPTY_STORE }); setIsNew(true) }} className="btn-primary flex items-center gap-2">
-          <Plus className="w-4 h-4" /> Add Store
-        </button>
+        <div className="flex gap-2">
+          <BulkUpload
+            label="Dark Stores"
+            templateHeaders={['store_code', 'name', 'latitude', 'longitude', 'address', 'city']}
+            templateExample={[
+              { store_code: 'DS-006', name: 'Al Quoz Store', latitude: '25.1481', longitude: '55.2288', address: 'Al Quoz Industrial Area 1', city: 'Dubai' },
+              { store_code: 'DS-007', name: 'Deira Store', latitude: '25.2697', longitude: '55.3095', address: 'Al Rigga Street', city: 'Dubai' },
+            ]}
+            onUpload={handleBulkUpload}
+          />
+          <button onClick={() => { setEditing({ ...EMPTY_STORE }); setIsNew(true) }} className="btn-primary flex items-center gap-2">
+            <Plus className="w-4 h-4" /> Add Store
+          </button>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
@@ -65,7 +101,7 @@ export default function StoresPage() {
           <div key={store.id} className={`bg-white rounded-xl border shadow-sm p-5 ${store.is_active ? 'border-gray-200' : 'border-gray-100 opacity-60'}`}>
             <div className="flex items-start justify-between mb-3">
               <div className="flex items-center gap-3">
-                <div className="w-10 h-10 bg-blue-50 rounded-xl flex items-center justify-center">
+                <div className="w-10 h-10 bg-blue-50 rounded-xl flex items-center justify-center flex-shrink-0">
                   <StoreIcon className="w-5 h-5 text-blue-600" />
                 </div>
                 <div>
@@ -79,9 +115,7 @@ export default function StoresPage() {
                   <Pencil className="w-4 h-4 text-gray-400" />
                 </button>
                 <button onClick={() => toggleActive(store)} className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors">
-                  {store.is_active
-                    ? <ToggleRight className="w-5 h-5 text-green-500" />
-                    : <ToggleLeft className="w-5 h-5 text-gray-400" />}
+                  {store.is_active ? <ToggleRight className="w-5 h-5 text-green-500" /> : <ToggleLeft className="w-5 h-5 text-gray-400" />}
                 </button>
               </div>
             </div>
@@ -102,9 +136,8 @@ export default function StoresPage() {
         ))}
       </div>
 
-      {/* Edit Modal */}
       {editing && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-xl shadow-xl p-6 w-full max-w-md space-y-4">
             <h2 className="font-semibold text-gray-900">{isNew ? 'Add Store' : 'Edit Store'}</h2>
             <div className="grid grid-cols-2 gap-3">
@@ -125,9 +158,7 @@ export default function StoresPage() {
               ))}
             </div>
             <div className="flex gap-3 pt-1">
-              <button onClick={handleSave} className="btn-primary flex-1">
-                {isNew ? 'Create Store' : 'Save Changes'}
-              </button>
+              <button onClick={handleSave} className="btn-primary flex-1">{isNew ? 'Create Store' : 'Save Changes'}</button>
               <button onClick={() => setEditing(null)} className="btn-secondary flex-1">Cancel</button>
             </div>
           </div>
