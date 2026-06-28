@@ -38,6 +38,7 @@ dependencies:
 
   # Storage
   flutter_secure_storage: ^9.2.2
+  flutter_image_compress: ^2.2.0
 
 dev_dependencies:
   flutter_test:

@@ -1,4 +1,6 @@
 import 'dart:io';
+import 'dart:typed_data';
+import 'package:flutter_image_compress/flutter_image_compress.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../models/training_session_model.dart';
 
@@ -198,10 +200,23 @@ class SupabaseService {
 
   static Future<String> uploadPod(File file, String storeId, String sessionId, String type) async {
     final uid = userId!;
-    final ext = file.path.split('.').last;
-    final path = '$storeId/$uid/$sessionId/$type.$ext';
-    await _client.storage.from('pod-photos').upload(path, file,
-        fileOptions: const FileOptions(upsert: true));
+    final path = '$storeId/$uid/$sessionId/$type.jpg';
+
+    final Uint8List bytes;
+    final compressed = await FlutterImageCompress.compressWithFile(
+      file.absolute.path,
+      minWidth: 1024,
+      minHeight: 768,
+      quality: 72,
+      format: CompressFormat.jpeg,
+    );
+    bytes = compressed ?? await file.readAsBytes();
+
+    await _client.storage.from('pod-photos').uploadBinary(
+      path,
+      bytes,
+      fileOptions: const FileOptions(upsert: true, contentType: 'image/jpeg'),
+    );
     return _client.storage.from('pod-photos').getPublicUrl(path);
   }
 
