@@ -63,11 +63,9 @@ export default function ReportsPage() {
         query = supabase.from('store_performance_view').select('*').order('store_name')
       }
 
-      if (storeId && type === 'sessions') {
-        (query as ReturnType<typeof supabase.from>).eq('store_id', storeId)
-      }
-
-      const { data, error } = await query
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const finalQuery = (storeId && type === 'sessions') ? (query as any).eq('store_id', storeId) : query
+      const { data, error } = await finalQuery
       if (error) throw error
       if (!data || data.length === 0) { toast.error('No data for the selected filters'); return }
 

@@ -5,10 +5,13 @@ import { ClipboardList, Plus, Star } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { formatDistanceToNow } from 'date-fns'
 
-interface SessionRow extends TrainingSession {
-  profiles: Profile
-  training_locations: TrainingLocation
-  stores: { name: string }
+interface SessionRow {
+  id: string
+  order_code: string
+  status: string
+  rider_id: string
+  profiles: { full_name: string } | null
+  training_locations: { name: string } | null
 }
 
 interface EvalRow {
@@ -42,7 +45,7 @@ export default function EvaluationsPage() {
     ])
     if (user) setMyId(user.id)
     if (evalsRes.data) setEvals(evalsRes.data as EvalRow[])
-    if (sessionsRes.data) setSessions(sessionsRes.data as SessionRow[])
+    if (sessionsRes.data) setSessions(sessionsRes.data as unknown as SessionRow[])
     setLoading(false)
   }, [])
 
