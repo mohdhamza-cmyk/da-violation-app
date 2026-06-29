@@ -174,7 +174,7 @@ class SupabaseService {
         .from('training_sessions')
         .select('*, training_locations(*), stores(*)')
         .eq('rider_id', userId!)
-        .in_('status', ['completed', 'failed'])
+        .inFilter('status', ['completed', 'failed'])
         .order('return_completed_at', ascending: false)
         .limit(30);
     return (data as List).map((e) => TrainingSessionModel.fromJson(e)).toList();

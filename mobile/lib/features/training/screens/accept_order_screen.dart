@@ -33,7 +33,7 @@ class _AcceptOrderScreenState extends State<AcceptOrderScreen> {
     setState(() => _accepting = true);
     try {
       Position pos = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
+        desiredAccuracy: LocationAccuracy.high,
       );
       await SupabaseService.acceptOrder(widget.sessionId, pos.latitude, pos.longitude);
       if (mounted) context.go('/pickup', extra: widget.sessionId);

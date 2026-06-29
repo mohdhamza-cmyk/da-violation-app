@@ -22,11 +22,11 @@ class AppTheme {
             fontWeight: FontWeight.w600,
           ),
         ),
-        cardTheme: CardThemeData(
+        cardTheme: const CardTheme(
           elevation: 0,
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
-            side: const BorderSide(color: Color(0xFFE5E7EB)),
+            borderRadius: BorderRadius.all(Radius.circular(12)),
+            side: BorderSide(color: Color(0xFFE5E7EB)),
           ),
           color: Colors.white,
         ),

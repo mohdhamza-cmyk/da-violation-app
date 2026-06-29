@@ -59,7 +59,7 @@ class _DeliveryPodScreenState extends State<DeliveryPodScreen> {
     setState(() => _uploading = true);
     try {
       final pos = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
+        desiredAccuracy: LocationAccuracy.high,
       );
       final loc = _session?.location;
       final geofenceOk = loc != null &&

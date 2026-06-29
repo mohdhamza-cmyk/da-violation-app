@@ -36,7 +36,7 @@ class _ArrivedScreenState extends State<ArrivedScreen> {
     if (loc == null) return;
     try {
       final pos = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
+        desiredAccuracy: LocationAccuracy.high,
       );
       final dist = GeofenceUtils.distanceMeters(pos.latitude, pos.longitude, loc.latitude, loc.longitude);
       if (mounted) setState(() => _distanceMeters = dist);
@@ -47,7 +47,7 @@ class _ArrivedScreenState extends State<ArrivedScreen> {
     setState(() => _confirming = true);
     try {
       final pos = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
+        desiredAccuracy: LocationAccuracy.high,
       );
       await SupabaseService.markArrived(widget.sessionId, pos.latitude, pos.longitude);
       if (mounted) context.go('/delivery-pod', extra: widget.sessionId);

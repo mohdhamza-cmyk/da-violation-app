@@ -38,7 +38,7 @@ class _ReturnCompleteScreenState extends State<ReturnCompleteScreen> {
     if (store == null) return;
     try {
       final pos = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
+        desiredAccuracy: LocationAccuracy.high,
       );
       final dist = GeofenceUtils.distanceMeters(pos.latitude, pos.longitude, store.latitude, store.longitude);
       if (mounted) setState(() => _distanceMeters = dist);
@@ -49,7 +49,7 @@ class _ReturnCompleteScreenState extends State<ReturnCompleteScreen> {
     setState(() => _completing = true);
     try {
       final pos = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
+        desiredAccuracy: LocationAccuracy.high,
       );
       final store = _session?.store;
       final geofenceOk = store != null &&

@@ -65,7 +65,7 @@ class _PickupScreenState extends State<PickupScreen> {
     setState(() => _uploading = true);
     try {
       final pos = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
+        desiredAccuracy: LocationAccuracy.high,
       );
       final storeId = _session?.storeId ?? '';
       final url = await SupabaseService.uploadPod(_capturedPhoto!, storeId, widget.sessionId, 'pickup');
