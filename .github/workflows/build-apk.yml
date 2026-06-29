@@ -17,13 +17,23 @@ jobs:
           channel: 'stable'
           cache: true
 
+      - name: Create assets directory
+        working-directory: mobile
+        run: mkdir -p assets/images
+
+      - name: Generate Android platform files
+        working-directory: mobile
+        run: |
+          flutter create --platforms=android --project-name=rider_training_app --org=com.ridertraining --overwrite .
+          git checkout android/app/src/main/AndroidManifest.xml
+
       - name: Get dependencies
         working-directory: mobile
         run: flutter pub get
 
       - name: Build release APK
         working-directory: mobile
-        run: flutter build apk --release
+        run: flutter build apk --release --no-tree-shake-icons
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
