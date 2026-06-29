@@ -25,7 +25,7 @@ jobs:
         working-directory: mobile
         run: |
           flutter create --platforms=android --project-name=rider_training_app --org=com.ridertraining --overwrite .
-          git checkout android/app/src/main/AndroidManifest.xml lib/ pubspec.yaml
+          git checkout android/app/src/main/AndroidManifest.xml android/app/build.gradle lib/ pubspec.yaml
           # KGP 2.1.0: package_info_plus 9.x uses kotlin-stdlib 2.2.0; KGP 1.x cannot read 2.x metadata
           # AGP 8.1.0 (Flutter 3.24 default) is compatible with KGP 2.x per JetBrains docs
           sed -i 's/id "org.jetbrains.kotlin.android" version "[^"]*"/id "org.jetbrains.kotlin.android" version "2.1.0"/' android/settings.gradle
@@ -39,11 +39,6 @@ jobs:
               ext.flutter = [compileSdkVersion: 35, targetSdkVersion: 35, minSdkVersion: 23, ndkVersion: '25.1.8937393']
           }
           GRADLE
-          # Flutter 3.22+ uses compileSdk/minSdk/targetSdk (no "Version" suffix) in app/build.gradle
-          sed -i 's/compileSdk flutter\.compileSdkVersion/compileSdk 35/' android/app/build.gradle
-          sed -i 's/targetSdk flutter\.targetSdkVersion/targetSdk 35/' android/app/build.gradle
-          # passkeys_android requires minSdk 23; bump from Flutter default of 21
-          sed -i 's/minSdk flutter\.minSdkVersion/minSdk 23/' android/app/build.gradle
 
       - name: Get dependencies
         working-directory: mobile
