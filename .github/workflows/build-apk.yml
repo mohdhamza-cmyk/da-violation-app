@@ -29,6 +29,9 @@ jobs:
           # KGP 2.1.0: package_info_plus 9.x uses kotlin-stdlib 2.2.0; KGP 1.x cannot read 2.x metadata
           # AGP 8.1.0 (Flutter 3.24 default) is compatible with KGP 2.x per JetBrains docs
           sed -i 's/id "org.jetbrains.kotlin.android" version "[^"]*"/id "org.jetbrains.kotlin.android" version "2.1.0"/' android/settings.gradle
+          # AGP 7.3.0 (Flutter 3.24 default) < KGP 2.1.0 minimum of 7.3.1; bump to 7.4.2 (compatible with Gradle 7.6.3)
+          sed -i 's/id "com.android.application" version "[^"]*"/id "com.android.application" version "7.4.2"/' android/settings.gradle
+          sed -i 's/id "com.android.library" version "[^"]*"/id "com.android.library" version "7.4.2"/' android/settings.gradle
           # app_links 6.x needs ext.flutter; compileSdk 35 for flutter_plugin_android_lifecycle
           cat >> android/build.gradle << 'GRADLE'
 
