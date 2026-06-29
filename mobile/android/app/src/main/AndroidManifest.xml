@@ -37,24 +37,25 @@
             android:name="flutterEmbedding"
             android:value="2"/>
 
-        <!-- Deep links for maps -->
-        <queries>
-            <intent>
-                <action android:name="android.intent.action.VIEW"/>
-                <data android:scheme="https"/>
-            </intent>
-            <intent>
-                <action android:name="android.intent.action.VIEW"/>
-                <data android:scheme="waze"/>
-            </intent>
-            <intent>
-                <action android:name="android.intent.action.VIEW"/>
-                <data android:scheme="dgis"/>
-            </intent>
-            <intent>
-                <action android:name="android.intent.action.VIEW"/>
-                <data android:scheme="yandexmaps"/>
-            </intent>
-        </queries>
     </application>
+
+    <!-- Queries for url_launcher (maps, waze, etc.) -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.VIEW"/>
+            <data android:scheme="https"/>
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW"/>
+            <data android:scheme="waze"/>
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW"/>
+            <data android:scheme="dgis"/>
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW"/>
+            <data android:scheme="yandexmaps"/>
+        </intent>
+    </queries>
 </manifest>
