@@ -25,7 +25,7 @@ jobs:
         working-directory: mobile
         run: |
           flutter create --platforms=android --project-name=rider_training_app --org=com.ridertraining --overwrite .
-          git checkout android/app/src/main/AndroidManifest.xml
+          git checkout android/app/src/main/AndroidManifest.xml lib/ pubspec.yaml
 
       - name: Get dependencies
         working-directory: mobile
