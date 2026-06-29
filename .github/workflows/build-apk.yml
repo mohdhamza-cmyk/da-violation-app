@@ -36,12 +36,14 @@ jobs:
           cat >> android/build.gradle << 'GRADLE'
 
           allprojects {
-              ext.flutter = [compileSdkVersion: 35, targetSdkVersion: 35, minSdkVersion: 21, ndkVersion: '25.1.8937393']
+              ext.flutter = [compileSdkVersion: 35, targetSdkVersion: 35, minSdkVersion: 23, ndkVersion: '25.1.8937393']
           }
           GRADLE
-          # Force app-level compileSdk/targetSdk to 35 (plugins require SDK 35; Flutter 3.24 defaults to 34)
-          sed -i 's/compileSdkVersion flutter.compileSdkVersion/compileSdkVersion 35/' android/app/build.gradle
-          sed -i 's/targetSdkVersion flutter.targetSdkVersion/targetSdkVersion 35/' android/app/build.gradle
+          # Flutter 3.22+ uses compileSdk/minSdk/targetSdk (no "Version" suffix) in app/build.gradle
+          sed -i 's/compileSdk flutter\.compileSdkVersion/compileSdk 35/' android/app/build.gradle
+          sed -i 's/targetSdk flutter\.targetSdkVersion/targetSdk 35/' android/app/build.gradle
+          # passkeys_android requires minSdk 23; bump from Flutter default of 21
+          sed -i 's/minSdk flutter\.minSdkVersion/minSdk 23/' android/app/build.gradle
 
       - name: Get dependencies
         working-directory: mobile
