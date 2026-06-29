@@ -26,6 +26,14 @@ jobs:
         run: |
           flutter create --platforms=android --project-name=rider_training_app --org=com.ridertraining --overwrite .
           git checkout android/app/src/main/AndroidManifest.xml lib/ pubspec.yaml
+          # app_links 6.x references flutter.compileSdkVersion in plugin subprojects;
+          # inject it into the root build.gradle so all subprojects can find it
+          cat >> android/build.gradle << 'GRADLE'
+
+          allprojects {
+              ext.flutter = [compileSdkVersion: 34, targetSdkVersion: 34, minSdkVersion: 21, ndkVersion: '25.1.8937393']
+          }
+          GRADLE
 
       - name: Get dependencies
         working-directory: mobile
