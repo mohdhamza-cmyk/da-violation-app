@@ -39,6 +39,9 @@ jobs:
               ext.flutter = [compileSdkVersion: 35, targetSdkVersion: 35, minSdkVersion: 21, ndkVersion: '25.1.8937393']
           }
           GRADLE
+          # Force app-level compileSdk/targetSdk to 35 (plugins require SDK 35; Flutter 3.24 defaults to 34)
+          sed -i 's/compileSdkVersion flutter.compileSdkVersion/compileSdkVersion 35/' android/app/build.gradle
+          sed -i 's/targetSdkVersion flutter.targetSdkVersion/targetSdkVersion 35/' android/app/build.gradle
 
       - name: Get dependencies
         working-directory: mobile
