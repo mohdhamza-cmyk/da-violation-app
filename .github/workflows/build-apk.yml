@@ -27,12 +27,9 @@ jobs:
           flutter create --platforms=android --project-name=rider_training_app --org=com.ridertraining --overwrite .
           git checkout android/app/src/main/AndroidManifest.xml lib/ pubspec.yaml
           # KGP 2.1.0: package_info_plus 9.x uses kotlin-stdlib 2.2.0; KGP 1.x cannot read 2.x metadata
+          # AGP 8.1.0 (Flutter 3.24 default) is compatible with KGP 2.x per JetBrains docs
           sed -i 's/id "org.jetbrains.kotlin.android" version "[^"]*"/id "org.jetbrains.kotlin.android" version "2.1.0"/' android/settings.gradle
-          # AGP 8.3.2: minimum AGP that supports KGP 2.x
-          sed -i 's/id "com.android.application" version "[^"]*"/id "com.android.application" version "8.3.2"/' android/settings.gradle
-          # Gradle 8.4: required by AGP 8.3.x
-          sed -i 's/gradle-[0-9]*\.[0-9]*-bin\.zip/gradle-8.4-bin.zip/' android/gradle/wrapper/gradle-wrapper.properties
-          # app_links 6.x ext; compileSdk 35 for flutter_plugin_android_lifecycle
+          # app_links 6.x needs ext.flutter; compileSdk 35 for flutter_plugin_android_lifecycle
           cat >> android/build.gradle << 'GRADLE'
 
           allprojects {
