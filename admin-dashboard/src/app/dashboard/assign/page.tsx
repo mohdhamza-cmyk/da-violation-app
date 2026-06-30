@@ -2,7 +2,7 @@
 export const dynamic = 'force-dynamic'
 import { useEffect, useState, useCallback } from 'react'
 import { supabase } from '@/lib/supabase'
-import { Send, RefreshCw } from 'lucide-react'
+import { Send, RefreshCw, Zap, XCircle } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { formatDistanceToNow } from 'date-fns'
 
@@ -28,6 +28,8 @@ export default function AssignPage() {
   const [picked, setPicked] = useState<Record<string, string>>({})
   const [loading, setLoading] = useState(true)
   const [assigning, setAssigning] = useState<string | null>(null)
+  const [cancelling, setCancelling] = useState<string | null>(null)
+  const [bulk, setBulk] = useState(false)
 
   const load = useCallback(async () => {
     const [sessionsRes, locsRes] = await Promise.all([
@@ -71,6 +73,38 @@ export default function AssignPage() {
     load()
   }
 
+  async function assignAll() {
+    if (waiting.length === 0) return
+    setBulk(true)
+    let ok = 0
+    for (const s of waiting) {
+      const locationId = picked[s.id] || s.location_id
+      const update: Record<string, unknown> = { status: 'assigned', assigned_at: new Date().toISOString() }
+      if (locationId) update.location_id = locationId
+      const { error } = await supabase.from('training_sessions').update(update).eq('id', s.id).eq('status', 'waiting')
+      if (!error) ok++
+    }
+    setBulk(false)
+    toast.success(`Auto-assigned ${ok} order${ok === 1 ? '' : 's'}`)
+    load()
+  }
+
+  async function cancel(session: WaitingSession) {
+    setCancelling(session.id)
+    const { error } = await supabase
+      .from('training_sessions')
+      .update({ status: 'failed' })
+      .eq('id', session.id)
+      .eq('status', 'waiting')
+    setCancelling(null)
+    if (error) {
+      toast.error(`Cancel failed: ${error.message}`)
+      return
+    }
+    toast.success(`Cancelled ${session.order_code}`)
+    load()
+  }
+
   return (
     <div className="p-4 lg:p-8 max-w-5xl mx-auto">
       <div className="flex items-center justify-between mb-6">
@@ -78,9 +112,16 @@ export default function AssignPage() {
           <h1 className="text-2xl font-bold text-gray-900">Assign Orders</h1>
           <p className="text-gray-500 text-sm mt-1">Riders waiting in the queue. Assign an order to send them to the Accept screen.</p>
         </div>
-        <button onClick={load} className="btn-secondary flex items-center gap-2">
-          <RefreshCw className="w-4 h-4" /> Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          {waiting.length > 0 && (
+            <button onClick={assignAll} disabled={bulk} className="btn-primary flex items-center gap-2">
+              <Zap className="w-4 h-4" /> {bulk ? 'Assigning…' : `Auto-assign all (${waiting.length})`}
+            </button>
+          )}
+          <button onClick={load} className="btn-secondary flex items-center gap-2">
+            <RefreshCw className="w-4 h-4" /> Refresh
+          </button>
+        </div>
       </div>
 
       {loading ? (
@@ -119,11 +160,19 @@ export default function AssignPage() {
               </select>
               <button
                 onClick={() => assign(s)}
-                disabled={assigning === s.id}
+                disabled={assigning === s.id || cancelling === s.id}
                 className="btn-primary flex items-center justify-center gap-2 lg:w-40"
               >
                 <Send className="w-4 h-4" />
                 {assigning === s.id ? 'Assigning…' : 'Assign Order'}
+              </button>
+              <button
+                onClick={() => cancel(s)}
+                disabled={assigning === s.id || cancelling === s.id}
+                className="flex items-center justify-center gap-2 px-3 py-2 rounded-lg border border-red-200 text-red-600 hover:bg-red-50 text-sm font-medium transition-colors"
+              >
+                <XCircle className="w-4 h-4" />
+                {cancelling === s.id ? 'Cancelling…' : 'Cancel'}
               </button>
             </div>
           ))}

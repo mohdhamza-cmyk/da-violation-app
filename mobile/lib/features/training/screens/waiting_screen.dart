@@ -20,6 +20,18 @@ class _WaitingScreenState extends State<WaitingScreen> with SingleTickerProvider
     _pulseCtrl = AnimationController(vsync: this, duration: const Duration(seconds: 2))
       ..repeat(reverse: true);
     _subscribeToOrders();
+    _checkAlreadyAssigned();
+  }
+
+  // Auto-assignment happens server-side the instant a rider enters the queue,
+  // so the order may already be 'assigned' before the realtime listener is
+  // attached. Check once on load and advance if so.
+  Future<void> _checkAlreadyAssigned() async {
+    final session = await SupabaseService.getActiveSession();
+    if (!mounted) return;
+    if (session != null && session.status == 'assigned') {
+      context.go('/accept-order', extra: session.id);
+    }
   }
 
   void _subscribeToOrders() {
