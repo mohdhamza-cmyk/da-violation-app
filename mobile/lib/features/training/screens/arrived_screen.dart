@@ -3,6 +3,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:go_router/go_router.dart';
 import '../../../core/services/supabase_service.dart';
 import '../../../core/models/training_session_model.dart';
+import '../../../core/utils/location_helper.dart';
 import '../../../core/utils/geofence_utils.dart';
 
 class ArrivedScreen extends StatefulWidget {
@@ -35,9 +36,7 @@ class _ArrivedScreenState extends State<ArrivedScreen> {
     final loc = _session?.location;
     if (loc == null) return;
     try {
-      final pos = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.high,
-      );
+      final pos = await LocationHelper.getCurrentPosition();
       final dist = GeofenceUtils.distanceMeters(pos.latitude, pos.longitude, loc.latitude, loc.longitude);
       if (mounted) setState(() => _distanceMeters = dist);
     } catch (_) {}
@@ -46,9 +45,7 @@ class _ArrivedScreenState extends State<ArrivedScreen> {
   Future<void> _confirmArrival() async {
     setState(() => _confirming = true);
     try {
-      final pos = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.high,
-      );
+      final pos = await LocationHelper.getCurrentPosition();
       await SupabaseService.markArrived(widget.sessionId, pos.latitude, pos.longitude);
       if (mounted) context.go('/delivery-pod', extra: widget.sessionId);
     } catch (e) {

@@ -1,11 +1,11 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
-import 'package:geolocator/geolocator.dart';
 import 'package:go_router/go_router.dart';
 import '../../../core/services/supabase_service.dart';
 import '../../../core/models/training_session_model.dart';
 import '../../../core/utils/geofence_utils.dart';
+import '../../../core/utils/location_helper.dart';
 
 class DeliveryPodScreen extends StatefulWidget {
   final String sessionId;
@@ -58,9 +58,7 @@ class _DeliveryPodScreenState extends State<DeliveryPodScreen> {
     }
     setState(() => _uploading = true);
     try {
-      final pos = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.high,
-      );
+      final pos = await LocationHelper.getCurrentPosition();
       final loc = _session?.location;
       final geofenceOk = loc != null &&
           GeofenceUtils.isWithin(pos.latitude, pos.longitude, loc.latitude, loc.longitude, loc.geofenceRadiusMeters.toDouble());

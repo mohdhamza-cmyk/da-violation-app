@@ -1,11 +1,11 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
-import 'package:geolocator/geolocator.dart';
 import 'package:go_router/go_router.dart';
 import 'package:path_provider/path_provider.dart';
 import '../../../core/services/supabase_service.dart';
 import '../../../core/models/training_session_model.dart';
+import '../../../core/utils/location_helper.dart';
 
 class PickupScreen extends StatefulWidget {
   final String sessionId;
@@ -64,9 +64,7 @@ class _PickupScreenState extends State<PickupScreen> {
     }
     setState(() => _uploading = true);
     try {
-      final pos = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.high,
-      );
+      final pos = await LocationHelper.getCurrentPosition();
       final storeId = _session?.storeId ?? '';
       final url = await SupabaseService.uploadPod(_capturedPhoto!, storeId, widget.sessionId, 'pickup');
       await SupabaseService.completePickup(widget.sessionId, url, pos.latitude, pos.longitude);

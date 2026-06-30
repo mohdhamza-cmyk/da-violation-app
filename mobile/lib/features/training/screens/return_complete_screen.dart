@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
-import 'package:geolocator/geolocator.dart';
 import 'package:go_router/go_router.dart';
 import '../../../core/services/supabase_service.dart';
 import '../../../core/models/training_session_model.dart';
 import '../../../core/utils/geofence_utils.dart';
+import '../../../core/utils/location_helper.dart';
 
 class ReturnCompleteScreen extends StatefulWidget {
   final String sessionId;
@@ -37,9 +37,7 @@ class _ReturnCompleteScreenState extends State<ReturnCompleteScreen> {
     final store = _session?.store;
     if (store == null) return;
     try {
-      final pos = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.high,
-      );
+      final pos = await LocationHelper.getCurrentPosition();
       final dist = GeofenceUtils.distanceMeters(pos.latitude, pos.longitude, store.latitude, store.longitude);
       if (mounted) setState(() => _distanceMeters = dist);
     } catch (_) {}
@@ -48,9 +46,7 @@ class _ReturnCompleteScreenState extends State<ReturnCompleteScreen> {
   Future<void> _completeReturn() async {
     setState(() => _completing = true);
     try {
-      final pos = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.high,
-      );
+      final pos = await LocationHelper.getCurrentPosition();
       final store = _session?.store;
       final geofenceOk = store != null &&
           GeofenceUtils.isWithin(pos.latitude, pos.longitude, store.latitude, store.longitude, storeGeofenceMeters);

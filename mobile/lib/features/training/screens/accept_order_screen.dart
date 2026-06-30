@@ -3,6 +3,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:go_router/go_router.dart';
 import '../../../core/services/supabase_service.dart';
 import '../../../core/models/training_session_model.dart';
+import '../../../core/utils/location_helper.dart';
 
 class AcceptOrderScreen extends StatefulWidget {
   final String sessionId;
@@ -32,9 +33,7 @@ class _AcceptOrderScreenState extends State<AcceptOrderScreen> {
   Future<void> _accept() async {
     setState(() => _accepting = true);
     try {
-      Position pos = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.high,
-      );
+      Position pos = await LocationHelper.getCurrentPosition();
       await SupabaseService.acceptOrder(widget.sessionId, pos.latitude, pos.longitude);
       if (mounted) context.go('/pickup', extra: widget.sessionId);
     } catch (e) {
