@@ -5,11 +5,12 @@ import { supabase } from '@/lib/supabase'
 import toast from 'react-hot-toast'
 import {
   LayoutDashboard, Users, Store, MapPin, BarChart2,
-  FileText, LogOut, Bike, Bell, ClipboardList, X
+  FileText, LogOut, Bike, Bell, ClipboardList, X, Send
 } from 'lucide-react'
 
 const NAV = [
   { href: '/dashboard', label: 'Live Dashboard', icon: LayoutDashboard },
+  { href: '/dashboard/assign', label: 'Assign Orders', icon: Send },
   { href: '/dashboard/riders', label: 'Riders', icon: Bike },
   { href: '/dashboard/stores', label: 'Dark Stores', icon: Store },
   { href: '/dashboard/locations', label: 'Locations', icon: MapPin },
