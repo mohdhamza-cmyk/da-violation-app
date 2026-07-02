@@ -61,15 +61,23 @@ function ensureWeekHeader(sheet) {
   if (String(cell.getValue()).trim() !== "Week") cell.setValue("Week");
 }
 
-// ── ROLLING CURRENT / ARCHIVE TABS ────────────────────────────────────────
-// Writes go to "Current" (kept small = fast). Rows older than CURRENT_DAYS roll
-// into "Archive" (full history). Reads return only "Current". This keeps the
-// app fast even as total history grows to tens of thousands of rows.
-const CURRENT_DAYS = 15;
+// ── ROLLING CURRENT + IMMUTABLE WEEKLY TABS ───────────────────────────────
+// The app reads and writes only the "Current" tab, which is kept small (the
+// last CURRENT_DAYS). A daily job MOVES rows older than CURRENT_DAYS out of
+// Current and appends them into immutable per-ISO-week tabs named "2026-W27".
+// Weekly tabs are APPEND-ONLY: once a row lands there it is never rewritten,
+// reordered, or deleted by this script — a permanent, week-partitioned history.
+// This keeps the live tab fast while preserving everything.
+const CURRENT_DAYS = 10;
 const SHEET_HEADERS = [
   "ID","Timestamp","Date","HourSlot","Store","TL","Supervisor","AM","CityManager",
   "Inside_Count","Outside_Count","Parking_Count","TotalFiles","DriveLink","FileLinks","Week"
 ];
+
+// True for a weekly-archive tab name like "2026-W07".
+function isWeekTabName(name) {
+  return /^\d{4}-W\d{2}$/.test(String(name).trim());
+}
 
 // The tab the app reads from and new rows are written to. Created on demand.
 function getCurrentSheet() {
@@ -83,21 +91,17 @@ function getCurrentSheet() {
   return cur;
 }
 
-// The full-history tab. If a legacy main tab exists (your original Sheet1 with
-// 48k rows) and no "Archive" yet, we treat that legacy tab as the archive so
-// nothing is ever lost — just rename Sheet1 to "Archive" when convenient.
-function getArchiveSheet() {
+// Get-or-create the immutable weekly tab for a label like "2026-W27" (or the
+// "Undated" catch-all). New tabs get the header row + a frozen header. This
+// NEVER clears or rewrites existing data — weekly tabs are append-only.
+function getWeekSheet(label) {
   const ss = SpreadsheetApp.openById(SHEET_ID);
-  let arc = ss.getSheetByName("Archive");
-  if (arc) return arc;
-  // Prefer an existing legacy tab (first sheet that isn't Current/utility tabs)
-  const reserved = ["Current","Failed Uploads","Purge Log","Sheet2","Analysis"];
-  const legacy = ss.getSheets().find(s => reserved.indexOf(s.getName()) === -1);
-  if (legacy) return legacy; // use the existing history tab in place
-  arc = ss.insertSheet("Archive");
-  arc.appendRow(SHEET_HEADERS);
-  arc.setFrozenRows(1);
-  return arc;
+  let sh = ss.getSheetByName(label);
+  if (sh) return sh;
+  sh = ss.insertSheet(label);
+  sh.appendRow(SHEET_HEADERS);
+  sh.setFrozenRows(1);
+  return sh;
 }
 
 // Parse a row's date (from the Date column, fallback Timestamp) to a Date.
@@ -107,15 +111,16 @@ function rowDate_(row, dateIdx, tsIdx) {
   return isNaN(d.getTime()) ? null : d;
 }
 
-// Move rows older than CURRENT_DAYS from Current -> Archive. Lightweight: only
-// acts when there's something to move, and batches the write/delete.
-function rollCurrentToArchive() {
+// Move rows older than CURRENT_DAYS from Current into their ISO-week tabs.
+// Runs once daily (from purgeOldFiles). Locked so it never overlaps a write.
+// APPEND-ONLY to weekly tabs; Current is rewritten with the kept recent rows
+// (clearContents preserves header formatting + frozen row).
+function rollCurrentToWeeklyTabs() {
   const lock = LockService.getScriptLock();
   try { lock.waitLock(10000); } catch (e) { return; } // if busy, skip this cycle
   try {
     const cur = getCurrentSheet();
-    const last = cur.getLastRow();
-    if (last < 2) return;
+    if (cur.getLastRow() < 2) return;
     const values = cur.getDataRange().getValues();
     const headers = values[0];
     const dateIdx = headers.indexOf("Date");
@@ -124,18 +129,30 @@ function rollCurrentToArchive() {
     cutoff.setUTCHours(0, 0, 0, 0);
     cutoff.setUTCDate(cutoff.getUTCDate() - CURRENT_DAYS);
 
-    const keep = [], move = [];
+    const keep = [];
+    const byWeek = {}; // weekLabel -> rows[]
     for (let i = 1; i < values.length; i++) {
-      const d = rowDate_(values[i], dateIdx, tsIdx);
-      if (d && d < cutoff) move.push(values[i]); else keep.push(values[i]);
+      const row = values[i];
+      const d = rowDate_(row, dateIdx, tsIdx);
+      if (d && d < cutoff) {
+        const wk = isoWeek(row[dateIdx] || (tsIdx >= 0 ? row[tsIdx] : "")) || "Undated";
+        (byWeek[wk] = byWeek[wk] || []).push(row);
+      } else {
+        keep.push(row);
+      }
     }
-    if (move.length === 0) return; // nothing to roll
+    const weeks = Object.keys(byWeek);
+    if (weeks.length === 0) return; // nothing to roll
 
-    const arc = getArchiveSheet();
-    if (arc.getLastRow() === 0) arc.appendRow(headers);
-    arc.getRange(arc.getLastRow() + 1, 1, move.length, move[0].length).setValues(move);
+    // Append moved rows into their week tabs (append-only, never rewritten).
+    weeks.forEach(function (wk) {
+      const rows = byWeek[wk];
+      const sh = getWeekSheet(wk);
+      sh.getRange(sh.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
+    });
 
-    // Rewrite Current with header + kept rows
+    // Rewrite Current with header + kept (recent) rows. Only Current is ever
+    // rewritten — the weekly tabs above are left untouched.
     cur.clearContents();
     cur.getRange(1, 1, 1, headers.length).setValues([headers]);
     if (keep.length > 0) cur.getRange(2, 1, keep.length, keep[0].length).setValues(keep);
@@ -145,15 +162,85 @@ function rollCurrentToArchive() {
   }
 }
 
+// ── ONE-TIME MIGRATION ────────────────────────────────────────────────────
+// Run ONCE from the editor. Splits your existing legacy history ("Sheet1", or
+// the first legacy tab if named differently) into immutable per-ISO-week tabs.
+// IDEMPOTENT: rows whose ID already exists in the target week tab are skipped,
+// so it is safe to run more than once and safe to re-run if it times out on a
+// very large sheet (just run it again — it resumes). NON-DESTRUCTIVE: the
+// source tab is left untouched — verify the weekly tabs, then delete the source
+// yourself if you want. Never modifies rows already in weekly tabs.
+function migrateSheet1ToWeeklyTabs() {
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  const reserved = ["Current","Failed Uploads","Purge Log","Sheet2","Analysis"];
+  let src = ss.getSheetByName("Sheet1") || ss.getSheetByName("Archive");
+  if (!src) src = ss.getSheets().find(function (s) {
+    return reserved.indexOf(s.getName()) === -1 && !isWeekTabName(s.getName());
+  });
+  if (!src) { Logger.log("No source (Sheet1/legacy) tab found."); return; }
+
+  const values = src.getDataRange().getValues();
+  if (values.length < 2) { Logger.log("Source tab '" + src.getName() + "' is empty."); return; }
+  const headers = values[0];
+  const dateIdx = headers.indexOf("Date");
+  const tsIdx = headers.indexOf("Timestamp");
+  const idIdx = headers.indexOf("ID");
+
+  // Group source rows by ISO week (skip blank/TEST rows).
+  const byWeek = {};
+  for (let i = 1; i < values.length; i++) {
+    const row = values[i];
+    if (!row[0] || String(row[0]) === "TEST") continue;
+    const wk = isoWeek(row[dateIdx] || (tsIdx >= 0 ? row[tsIdx] : "")) || "Undated";
+    (byWeek[wk] = byWeek[wk] || []).push(row);
+  }
+
+  const startTime = Date.now();
+  const MAX_MS = 5 * 60 * 1000; // stop ~1 min before the 6-min limit; re-run to resume
+  let moved = 0, skipped = 0, weeksDone = 0, stoppedEarly = false;
+
+  const weeks = Object.keys(byWeek).sort();
+  for (let w = 0; w < weeks.length; w++) {
+    if (Date.now() - startTime > MAX_MS) { stoppedEarly = true; break; }
+    const wk = weeks[w];
+    const sh = getWeekSheet(wk);
+    // Existing IDs already in this week tab → idempotent re-runs / resume.
+    const existing = {};
+    if (idIdx >= 0 && sh.getLastRow() >= 2) {
+      const ids = sh.getRange(2, idIdx + 1, sh.getLastRow() - 1, 1).getValues();
+      for (let k = 0; k < ids.length; k++) existing[String(ids[k][0])] = true;
+    }
+    const toAppend = [];
+    byWeek[wk].forEach(function (row) {
+      const id = idIdx >= 0 ? String(row[idIdx]) : "";
+      if (id && existing[id]) { skipped++; return; }
+      toAppend.push(row);
+    });
+    if (toAppend.length > 0) {
+      sh.getRange(sh.getLastRow() + 1, 1, toAppend.length, toAppend[0].length).setValues(toAppend);
+      moved += toAppend.length;
+    }
+    weeksDone++;
+  }
+
+  Logger.log("Migration from '" + src.getName() + "': appended " + moved + " row(s) across "
+    + weeksDone + " week tab(s); " + skipped + " already present (skipped)."
+    + (stoppedEarly ? " STOPPED EARLY on time — run migrateSheet1ToWeeklyTabs() again to continue (safe)." : " Done.")
+    + " Source tab left intact.");
+}
+
 // ── ONE-TIME SETUP ────────────────────────────────────────────────────────
 // Run this ONCE from the editor after deploying. It copies the last CURRENT_DAYS
 // of rows from your existing history tab into "Current" so the dashboard has
 // recent data immediately. Safe to re-run (it rebuilds Current from scratch).
+// Ignores weekly tabs when locating the source history.
 function seedCurrentFromHistory() {
   const ss = SpreadsheetApp.openById(SHEET_ID);
   const reserved = ["Current","Failed Uploads","Purge Log","Sheet2","Analysis"];
-  let history = ss.getSheetByName("Archive");
-  if (!history) history = ss.getSheets().find(s => reserved.indexOf(s.getName()) === -1);
+  let history = ss.getSheetByName("Sheet1") || ss.getSheetByName("Archive");
+  if (!history) history = ss.getSheets().find(function (s) {
+    return reserved.indexOf(s.getName()) === -1 && !isWeekTabName(s.getName());
+  });
   if (!history) { Logger.log("No history tab found."); return; }
 
   const values = history.getDataRange().getValues();
@@ -298,10 +385,10 @@ function doPost(e) {
     if (data.action === "finalize") {
       const sheet = getCurrentSheet();
       ensureWeekHeader(sheet);
-      // NOTE: rolling old rows to Archive is NOT done here — doing it on every
-      // submission acquired a global lock + rewrote the whole sheet, which
+      // NOTE: filing old rows into weekly tabs is NOT done here — doing it on
+      // every submission acquired a global lock + rewrote the whole sheet, which
       // caused "too many scripts running" at busy hours. It now runs once a day
-      // from the daily maintenance trigger (rollCurrentToArchive in purge).
+      // from the daily maintenance trigger (rollCurrentToWeeklyTabs in purge).
       // Idempotency: skip if this row already exists. Only scan the LAST ~1000
       // rows' ID column — a duplicate finalize is always a retry of a very
       // recent submission, so this avoids reading the entire (large) sheet on
@@ -511,9 +598,10 @@ function doGet(e) {
 }
 
 function purgeOldFiles() {
-  // Daily maintenance also rolls 15-day-old rows from Current -> Archive here
-  // (moved off the per-submission path to avoid lock contention at busy hours).
-  try { rollCurrentToArchive(); } catch (e) {}
+  // Daily maintenance also files rows older than CURRENT_DAYS from Current into
+  // their immutable weekly tabs here (moved off the per-submission path to
+  // avoid lock contention at busy hours).
+  try { rollCurrentToWeeklyTabs(); } catch (e) {}
 
   const RETENTION_DAYS = 10;
   const rootFolder = DriveApp.getFolderById(ROOT_FOLDER_ID);
