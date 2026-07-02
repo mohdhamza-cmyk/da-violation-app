@@ -221,14 +221,14 @@ function doPost(e) {
     if (data.action === "addFile") {
       const hourFolder = getHourFolder(data.store, data.date, data.hourSlot);
       const prefix = data.recordId + "__" + data.index + "__";
-      // Skip if already uploaded (idempotent retry)
-      const existing = hourFolder.getFiles();
-      while (existing.hasNext()) {
-        if (existing.next().getName().indexOf(prefix) === 0) {
-          return ContentService.createTextOutput(JSON.stringify({ success: true, skipped: true })).setMimeType(ContentService.MimeType.JSON);
-        }
-      }
       const safeName = prefix + (data.fileName || "file");
+      // Idempotent retry: skip if this exact file already exists. Look it up by
+      // NAME (O(1)) instead of scanning every file in the hour folder, which
+      // got progressively slower — and burned Drive quota — as the folder
+      // filled during a busy hour.
+      if (hourFolder.getFilesByName(safeName).hasNext()) {
+        return ContentService.createTextOutput(JSON.stringify({ success: true, skipped: true })).setMimeType(ContentService.MimeType.JSON);
+      }
       const blob = Utilities.newBlob(Utilities.base64Decode(data.base64), data.mimeType, safeName);
       const file = hourFolder.createFile(blob);
       file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
@@ -446,14 +446,22 @@ function doGet(e) {
     try {
       const hourFolder = getHourFolder(e.parameter.store, e.parameter.date, e.parameter.slot);
       const prefix = recId + "__";
-      let count = 0;
+      // Also return WHICH file indices are present (parsed from names shaped
+      // "<recordId>__<index>__..."), so the app can resend only the missing
+      // files on retry instead of re-uploading everything.
+      const indexSet = {};
       const fit = hourFolder.getFiles();
       while (fit.hasNext()) {
-        if (fit.next().getName().indexOf(prefix) === 0) count++;
+        const name = fit.next().getName();
+        if (name.indexOf(prefix) !== 0) continue;
+        const rest = name.substring(prefix.length);
+        const idx = parseInt(rest.split("__")[0], 10);
+        if (!isNaN(idx)) indexSet[idx] = true;
       }
-      return ContentService.createTextOutput(JSON.stringify({ count: count })).setMimeType(ContentService.MimeType.JSON);
+      const indices = Object.keys(indexSet).map(function (n) { return parseInt(n, 10); });
+      return ContentService.createTextOutput(JSON.stringify({ count: indices.length, indices: indices })).setMimeType(ContentService.MimeType.JSON);
     } catch (err) {
-      return ContentService.createTextOutput(JSON.stringify({ count: 0 })).setMimeType(ContentService.MimeType.JSON);
+      return ContentService.createTextOutput(JSON.stringify({ count: 0, indices: [] })).setMimeType(ContentService.MimeType.JSON);
     }
   }
 

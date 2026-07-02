@@ -1879,7 +1879,14 @@ async function postJSON(payload: any) {
   });
 }
 
-async function getServerFileCount(record: any): Promise<number> {
+// Ask the server which of this record's files already landed. Returns the
+// COUNT plus the SET of file indices present, so the retry loop can resend ONLY
+// the missing units instead of blindly resending everything (the old behavior,
+// which turned a single lagging file into a full re-upload of all 15 — a
+// feedback loop that amplified overload at the top of every hour).
+async function getServerPresence(
+  record: any
+): Promise<{ count: number; present: Set<number> }> {
   try {
     const u = `${GOOGLE_SCRIPT_URL}?fileCount=${encodeURIComponent(
       record.id
@@ -1888,9 +1895,12 @@ async function getServerFileCount(record: any): Promise<number> {
     )}&slot=${encodeURIComponent(record.hourSlot)}`;
     const r = await fetch(u);
     const j = await r.json();
-    return j.count || 0;
+    const present = new Set<number>(
+      Array.isArray(j.indices) ? j.indices.map((n: any) => Number(n)) : []
+    );
+    return { count: j.count || present.size || 0, present };
   } catch {
-    return 0;
+    return { count: 0, present: new Set<number>() };
   }
 }
 
@@ -1993,19 +2003,28 @@ async function sendUnit(record: any, u: UploadUnit) {
 }
 
 // Returns true if the submission fully landed (all files + Sheet row).
-// Fast: uploads up to 3 pieces in parallel. Reliable: confirms via the server
-// file count and resends only what's missing, with everything idempotent.
+// Reliability model: every unit is idempotent server-side, and each retry round
+// asks the server WHICH file indices are already present, then resends ONLY the
+// missing ones (not everything). Combined with exponential backoff, this stops
+// the old "one lagging file triggers a full re-upload" feedback loop that
+// amplified load at the top of every hour.
 async function uploadSubmission(record: any, files: any[]): Promise<boolean> {
   const total = files.length;
   const { units, chunkPlan } = buildUnits(files);
   const CONCURRENCY = 3;
 
-  // 1. Upload all units in parallel (bounded)
-  await runPool(units, CONCURRENCY, (u) => sendUnit(record, u));
+  // Send only the units belonging to the given set of missing file indices
+  // (or all units when `only` is null — used for the first pass).
+  async function sendUnits(only: Set<number> | null) {
+    const todo = only ? units.filter((u) => only.has(u.fileIndex)) : units;
+    await runPool(todo, CONCURRENCY, (u) => sendUnit(record, u));
+  }
 
-  // 2. Assemble any chunked videos (parallel, idempotent)
-  async function assembleAll() {
-    const videoIdxs = Array.from(chunkPlan.keys());
+  // Assemble chunked videos — but only the ones still missing on the server.
+  async function assembleMissing(missing: Set<number> | null) {
+    const videoIdxs = Array.from(chunkPlan.keys()).filter(
+      (fi) => !missing || missing.has(fi)
+    );
     await runPool(videoIdxs, CONCURRENCY, async (fi) => {
       const file = files[fi];
       await postJSON({
@@ -2022,35 +2041,38 @@ async function uploadSubmission(record: any, files: any[]): Promise<boolean> {
       });
     });
   }
-  await assembleAll();
 
-  // 3. Confirm all files exist; resend missing units + reassemble, up to 4 rounds
-  let saved = 0,
-    rounds = 0;
-  while (saved < total && rounds < 4) {
-    await sleep(2500);
-    saved = await getServerFileCount(record);
-    if (saved < total) {
-      await runPool(units, CONCURRENCY, (u) => sendUnit(record, u)); // idempotent resend
-      await assembleAll();
-    }
-    rounds++;
+  // 1. First pass: upload everything, then assemble any videos.
+  await sendUnits(null);
+  await assembleMissing(null);
+
+  // 2. Confirm + targeted resend, up to 3 rounds with exponential backoff.
+  let present = new Set<number>();
+  for (let round = 0; round < 3; round++) {
+    await sleep(2500 * Math.pow(1.6, round)); // 2.5s → 4s → 6.4s
+    const p = await getServerPresence(record);
+    present = p.present;
+    if (p.count >= total) break;
+    // Which of the expected file indices are still missing?
+    const missing = new Set<number>();
+    for (let i = 0; i < total; i++) if (!present.has(i)) missing.add(i);
+    if (missing.size === 0) break;
+    await sendUnits(missing);
+    await assembleMissing(missing);
   }
 
-  // 4. Finalize — write the Sheet row (idempotent server-side)
+  // 3. Finalize — write the Sheet row (idempotent server-side).
   await postJSON({ action: "finalize", ...record });
 
-  // 5. Verify the row landed
-  let ok = false,
-    vtries = 0;
-  while (!ok && vtries < 3) {
-    await sleep(vtries === 0 ? 4000 : 3500);
+  // 4. Verify the row landed, with backoff.
+  let ok = false;
+  for (let vtries = 0; vtries < 3 && !ok; vtries++) {
+    await sleep(vtries === 0 ? 4000 : 3500 * (vtries + 1));
     try {
       const c = await fetch(`${GOOGLE_SCRIPT_URL}?check=${record.id}`);
       const res = await c.json();
       ok = res.found === true;
     } catch {}
-    vtries++;
   }
   return ok;
 }
@@ -2377,11 +2399,17 @@ function UploadView() {
   }, []);
 
   // ── BACKGROUND SYNC ENGINE ──────────────────────────────────────────────
-  // Retries queued uploads whenever device is online. Runs on mount, on
-  // 'online' event, and every 30s. Removes items once confirmed in the Sheet.
+  // Retries queued uploads whenever the device is online, on the 'online'
+  // event, and on a JITTERED interval. The jitter is important: every device
+  // ran this on a fixed 30s tick, so all pending retries fired in lockstep and
+  // slammed the backend at the same instants — the same synchronization that
+  // makes the top-of-hour rush overload Apps Script. Randomizing each device's
+  // cadence (and its first run) spreads that load out.
   useEffect(() => {
     injectAnimations();
     let syncing = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let stopped = false;
     async function processQueue() {
       if (syncing || !navigator.onLine) return;
       const queue = await idbGetAll();
@@ -2401,11 +2429,23 @@ function UploadView() {
       setQueueCount(await idbCount());
       syncing = false;
     }
-    processQueue();
-    const iv = setInterval(processQueue, 30000);
+    // Reschedule with a random gap in [25s, 45s] so devices don't align.
+    function scheduleNextSync() {
+      if (stopped) return;
+      const gap = 25000 + Math.floor(Math.random() * 20000);
+      timer = setTimeout(async () => {
+        await processQueue();
+        scheduleNextSync();
+      }, gap);
+    }
+    // Stagger the very first run too (0–8s) instead of everyone at mount.
+    timer = setTimeout(() => {
+      processQueue().then(scheduleNextSync);
+    }, Math.floor(Math.random() * 8000));
     window.addEventListener("online", processQueue);
     return () => {
-      clearInterval(iv);
+      stopped = true;
+      if (timer) clearTimeout(timer);
       window.removeEventListener("online", processQueue);
     };
   }, []);
@@ -2431,11 +2471,29 @@ function UploadView() {
   function handleFileAdd(sid: SectionId, files: FileList | null) {
     if (!files) return;
     const sec = SECTIONS.find((s) => s.id === sid)!;
+    // Reject oversized videos up front. Large clips were split into dozens of
+    // base64 chunks and reassembled in memory server-side, which routinely blew
+    // Apps Script's 6-minute / memory limits and left the upload retrying
+    // forever. A 25 MB cap keeps a short audit clip well within safe limits.
+    const MAX_VIDEO_MB = 25;
+    const incoming = Array.from(files).filter((f) => {
+      const isVideo = f.type.startsWith("video");
+      if (isVideo && f.size > MAX_VIDEO_MB * 1024 * 1024) {
+        alert(
+          `That video is ${(f.size / (1024 * 1024)).toFixed(
+            0
+          )} MB. Please keep clips under ${MAX_VIDEO_MB} MB (record a shorter clip) so it uploads reliably.`
+        );
+        return false;
+      }
+      return true;
+    });
+    if (incoming.length === 0) return;
     setSections((prev) => {
       const cur = prev[sid],
         rem = sec.max - cur.length;
       if (rem <= 0) return prev;
-      const nf = Array.from(files)
+      const nf = incoming
         .slice(0, rem)
         .map((f) => ({
           id: Math.random().toString(36).slice(2),
@@ -2567,7 +2625,7 @@ function UploadView() {
     );
 
     const record: Submission = {
-      id: Date.now().toString(),
+      id: Date.now().toString() + "-" + Math.random().toString(36).slice(2, 8),
       timestamp: new Date().toISOString(),
       date: fmtDate(new Date().toISOString()),
       hourSlot: currentSlot,
