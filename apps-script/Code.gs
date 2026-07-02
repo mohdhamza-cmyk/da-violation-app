@@ -163,14 +163,24 @@ function rollCurrentToWeeklyTabs() {
 }
 
 // ── ONE-TIME MIGRATION ────────────────────────────────────────────────────
-// Run ONCE from the editor. Splits your existing legacy history ("Sheet1", or
-// the first legacy tab if named differently) into immutable per-ISO-week tabs.
-// IDEMPOTENT: rows whose ID already exists in the target week tab are skipped,
-// so it is safe to run more than once and safe to re-run if it times out on a
-// very large sheet (just run it again — it resumes). NON-DESTRUCTIVE: the
-// source tab is left untouched — verify the weekly tabs, then delete the source
-// yourself if you want. Never modifies rows already in weekly tabs.
+// Run REPEATEDLY from the editor until the log says "No remaining weeks — DONE".
+// Splits your existing legacy history ("Sheet1", or the first legacy tab if
+// named differently) into immutable per-ISO-week tabs.
+//
+// Designed for a LARGE source (tens of thousands of rows): it does only a few
+// weeks of work per run so it never overruns the Spreadsheet service (the
+// "Service Spreadsheets timed out" error you hit when it tried to do it all at
+// once). Just keep pressing Run — each pass files WEEKS_PER_RUN more weeks.
+//
+// IDEMPOTENT & RESUMABLE: a week whose tab already holds all its rows is skipped
+// instantly; a partially-filled week is completed by ID (no duplicates).
+// NON-DESTRUCTIVE: the source tab is never touched — verify the weekly tabs,
+// then delete the source yourself if you want.
 function migrateSheet1ToWeeklyTabs() {
+  const WEEKS_PER_RUN = 6;              // small batches → avoids service timeouts
+  const MAX_MS = 4 * 60 * 1000;         // hard stop well under the 6-min limit
+  const startTime = Date.now();
+
   const ss = SpreadsheetApp.openById(SHEET_ID);
   const reserved = ["Current","Failed Uploads","Purge Log","Sheet2","Analysis"];
   let src = ss.getSheetByName("Sheet1") || ss.getSheetByName("Archive");
@@ -195,38 +205,73 @@ function migrateSheet1ToWeeklyTabs() {
     (byWeek[wk] = byWeek[wk] || []).push(row);
   }
 
-  const startTime = Date.now();
-  const MAX_MS = 5 * 60 * 1000; // stop ~1 min before the 6-min limit; re-run to resume
-  let moved = 0, skipped = 0, weeksDone = 0, stoppedEarly = false;
+  // Retry wrapper for transient "Service Spreadsheets timed out" errors.
+  function withRetry(fn) {
+    for (let a = 0; a < 3; a++) {
+      try { return fn(); }
+      catch (e) { if (a === 2) throw e; Utilities.sleep(1500 * (a + 1)); }
+    }
+  }
+  function weekSheet(label) {
+    let sh = ss.getSheetByName(label);
+    if (sh) return sh;
+    sh = ss.insertSheet(label);
+    sh.appendRow(SHEET_HEADERS);
+    sh.setFrozenRows(1);
+    return sh;
+  }
 
   const weeks = Object.keys(byWeek).sort();
+  let processed = 0, moved = 0, skipped = 0, doneAlready = 0, remaining = 0;
+
   for (let w = 0; w < weeks.length; w++) {
-    if (Date.now() - startTime > MAX_MS) { stoppedEarly = true; break; }
     const wk = weeks[w];
-    const sh = getWeekSheet(wk);
-    // Existing IDs already in this week tab → idempotent re-runs / resume.
+    const srcRows = byWeek[wk];
+
+    // Fast skip: if the week tab already holds >= all its source rows, it's done.
+    const existingSheet = ss.getSheetByName(wk);
+    if (existingSheet && existingSheet.getLastRow() - 1 >= srcRows.length) {
+      doneAlready++;
+      continue;
+    }
+
+    // Budget guard — leave the rest for the next run.
+    if (processed >= WEEKS_PER_RUN || Date.now() - startTime > MAX_MS) {
+      remaining++;
+      continue;
+    }
+
+    const sh = withRetry(function () { return weekSheet(wk); });
+    // Existing IDs in this week tab → complete a partial week without duplicates.
     const existing = {};
     if (idIdx >= 0 && sh.getLastRow() >= 2) {
-      const ids = sh.getRange(2, idIdx + 1, sh.getLastRow() - 1, 1).getValues();
+      const ids = withRetry(function () {
+        return sh.getRange(2, idIdx + 1, sh.getLastRow() - 1, 1).getValues();
+      });
       for (let k = 0; k < ids.length; k++) existing[String(ids[k][0])] = true;
     }
     const toAppend = [];
-    byWeek[wk].forEach(function (row) {
+    srcRows.forEach(function (row) {
       const id = idIdx >= 0 ? String(row[idIdx]) : "";
       if (id && existing[id]) { skipped++; return; }
       toAppend.push(row);
     });
     if (toAppend.length > 0) {
-      sh.getRange(sh.getLastRow() + 1, 1, toAppend.length, toAppend[0].length).setValues(toAppend);
+      withRetry(function () {
+        sh.getRange(sh.getLastRow() + 1, 1, toAppend.length, toAppend[0].length).setValues(toAppend);
+      });
       moved += toAppend.length;
     }
-    weeksDone++;
+    SpreadsheetApp.flush(); // commit each week before moving on
+    processed++;
   }
 
-  Logger.log("Migration from '" + src.getName() + "': appended " + moved + " row(s) across "
-    + weeksDone + " week tab(s); " + skipped + " already present (skipped)."
-    + (stoppedEarly ? " STOPPED EARLY on time — run migrateSheet1ToWeeklyTabs() again to continue (safe)." : " Done.")
-    + " Source tab left intact.");
+  Logger.log("Migration from '" + src.getName() + "': this run filed " + processed
+    + " week tab(s) (" + moved + " rows, " + skipped + " already present); "
+    + doneAlready + " week(s) already complete."
+    + (remaining > 0
+        ? " " + remaining + " week(s) REMAINING — press Run again to continue."
+        : " No remaining weeks — DONE. Source tab left intact."));
 }
 
 // ── ONE-TIME SETUP ────────────────────────────────────────────────────────
