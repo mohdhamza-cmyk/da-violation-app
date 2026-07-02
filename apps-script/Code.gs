@@ -1,0 +1,713 @@
+const SHEET_ID = "1sqj5OIJP1whQ20YVWXZqONtOKexaGI6yOxKthSC4ymk";
+
+const ROOT_FOLDER_ID = "1q8BB_ZCUbTcoHCaK-O36_N50AH3jsPfE";
+
+// Live store list + POC mapping source (separate spreadsheet, Sheet1).
+// Columns: Store | TL | Supervisor | AM | City Manager
+const STORE_LIST_SHEET_ID = "192-ZhllfZyNJHMUqjbjseKxGcM0Eb14hKvuSO7dfunk";
+
+// Get-or-create a child folder. FAST PATH is lock-free (folder already exists),
+// which is the case for all but the very first request of each hour. We only
+// acquire the global lock when the folder is genuinely missing and must be
+// created — and we re-check inside the lock to avoid duplicate folders.
+// This is critical: the chunked uploader fires ~12 requests per submission, so
+// locking on every request (the old behavior) serialized everything globally
+// and caused mass timeouts/failures at scale.
+function getOrCreateFolder(parent, name) {
+  let it = parent.getFoldersByName(name);
+  if (it.hasNext()) return it.next();           // lock-free fast path
+  const lock = LockService.getScriptLock();
+  try { lock.waitLock(15000); } catch (e) {}
+  try {
+    it = parent.getFoldersByName(name);         // re-check after acquiring lock
+    if (it.hasNext()) return it.next();
+    return parent.createFolder(name);
+  } finally {
+    try { lock.releaseLock(); } catch (e) {}
+  }
+}
+
+function getHourFolder(store, date, hourSlot) {
+  const root = DriveApp.getFolderById(ROOT_FOLDER_ID);
+  const storeFolder = getOrCreateFolder(root, store);
+  const dateFolder = getOrCreateFolder(storeFolder, date);
+  const hourLabel = String(hourSlot).replace(":", "-");
+  return getOrCreateFolder(dateFolder, hourLabel);
+}
+
+function getTmpFolder(hourFolder) {
+  return getOrCreateFolder(hourFolder, "_tmp");
+}
+
+// ── WEEK-NUMBER TAGGING ───────────────────────────────────────────────────
+// Returns an ISO-8601 week label like "2026-W24" for a given date. Sortable,
+// unambiguous across year boundaries, and easy to pivot/filter on in Sheets.
+function isoWeek(dateInput) {
+  const d = new Date(dateInput);
+  if (isNaN(d.getTime())) return "";
+  const target = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  const dayNr = (target.getUTCDay() + 6) % 7;          // Mon=0 … Sun=6
+  target.setUTCDate(target.getUTCDate() - dayNr + 3);  // move to the Thursday of this week
+  const firstThursday = new Date(Date.UTC(target.getUTCFullYear(), 0, 4));
+  const firstDayNr = (firstThursday.getUTCDay() + 6) % 7;
+  firstThursday.setUTCDate(firstThursday.getUTCDate() - firstDayNr + 3);
+  const week = 1 + Math.round((target - firstThursday) / (7 * 24 * 3600 * 1000));
+  return target.getUTCFullYear() + "-W" + String(week).padStart(2, "0");
+}
+
+// Make sure the "Week" header exists in column 16, once. Safe to call often.
+function ensureWeekHeader(sheet) {
+  const cell = sheet.getRange(1, 16);
+  if (String(cell.getValue()).trim() !== "Week") cell.setValue("Week");
+}
+
+// ── ROLLING CURRENT / ARCHIVE TABS ────────────────────────────────────────
+// Writes go to "Current" (kept small = fast). Rows older than CURRENT_DAYS roll
+// into "Archive" (full history). Reads return only "Current". This keeps the
+// app fast even as total history grows to tens of thousands of rows.
+const CURRENT_DAYS = 15;
+const SHEET_HEADERS = [
+  "ID","Timestamp","Date","HourSlot","Store","TL","Supervisor","AM","CityManager",
+  "Inside_Count","Outside_Count","Parking_Count","TotalFiles","DriveLink","FileLinks","Week"
+];
+
+// The tab the app reads from and new rows are written to. Created on demand.
+function getCurrentSheet() {
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  let cur = ss.getSheetByName("Current");
+  if (!cur) {
+    cur = ss.insertSheet("Current", 0); // first tab
+    cur.appendRow(SHEET_HEADERS);
+    cur.setFrozenRows(1);
+  }
+  return cur;
+}
+
+// The full-history tab. If a legacy main tab exists (your original Sheet1 with
+// 48k rows) and no "Archive" yet, we treat that legacy tab as the archive so
+// nothing is ever lost — just rename Sheet1 to "Archive" when convenient.
+function getArchiveSheet() {
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  let arc = ss.getSheetByName("Archive");
+  if (arc) return arc;
+  // Prefer an existing legacy tab (first sheet that isn't Current/utility tabs)
+  const reserved = ["Current","Failed Uploads","Purge Log","Sheet2","Analysis"];
+  const legacy = ss.getSheets().find(s => reserved.indexOf(s.getName()) === -1);
+  if (legacy) return legacy; // use the existing history tab in place
+  arc = ss.insertSheet("Archive");
+  arc.appendRow(SHEET_HEADERS);
+  arc.setFrozenRows(1);
+  return arc;
+}
+
+// Parse a row's date (from the Date column, fallback Timestamp) to a Date.
+function rowDate_(row, dateIdx, tsIdx) {
+  let d = new Date(row[dateIdx]);
+  if (isNaN(d.getTime()) && tsIdx >= 0) d = new Date(row[tsIdx]);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+// Move rows older than CURRENT_DAYS from Current -> Archive. Lightweight: only
+// acts when there's something to move, and batches the write/delete.
+function rollCurrentToArchive() {
+  const lock = LockService.getScriptLock();
+  try { lock.waitLock(10000); } catch (e) { return; } // if busy, skip this cycle
+  try {
+    const cur = getCurrentSheet();
+    const last = cur.getLastRow();
+    if (last < 2) return;
+    const values = cur.getDataRange().getValues();
+    const headers = values[0];
+    const dateIdx = headers.indexOf("Date");
+    const tsIdx = headers.indexOf("Timestamp");
+    const cutoff = new Date();
+    cutoff.setUTCHours(0, 0, 0, 0);
+    cutoff.setUTCDate(cutoff.getUTCDate() - CURRENT_DAYS);
+
+    const keep = [], move = [];
+    for (let i = 1; i < values.length; i++) {
+      const d = rowDate_(values[i], dateIdx, tsIdx);
+      if (d && d < cutoff) move.push(values[i]); else keep.push(values[i]);
+    }
+    if (move.length === 0) return; // nothing to roll
+
+    const arc = getArchiveSheet();
+    if (arc.getLastRow() === 0) arc.appendRow(headers);
+    arc.getRange(arc.getLastRow() + 1, 1, move.length, move[0].length).setValues(move);
+
+    // Rewrite Current with header + kept rows
+    cur.clearContents();
+    cur.getRange(1, 1, 1, headers.length).setValues([headers]);
+    if (keep.length > 0) cur.getRange(2, 1, keep.length, keep[0].length).setValues(keep);
+    cur.setFrozenRows(1);
+  } finally {
+    try { lock.releaseLock(); } catch (e) {}
+  }
+}
+
+// ── ONE-TIME SETUP ────────────────────────────────────────────────────────
+// Run this ONCE from the editor after deploying. It copies the last CURRENT_DAYS
+// of rows from your existing history tab into "Current" so the dashboard has
+// recent data immediately. Safe to re-run (it rebuilds Current from scratch).
+function seedCurrentFromHistory() {
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  const reserved = ["Current","Failed Uploads","Purge Log","Sheet2","Analysis"];
+  let history = ss.getSheetByName("Archive");
+  if (!history) history = ss.getSheets().find(s => reserved.indexOf(s.getName()) === -1);
+  if (!history) { Logger.log("No history tab found."); return; }
+
+  const values = history.getDataRange().getValues();
+  if (values.length < 2) { Logger.log("History tab is empty."); return; }
+  const headers = values[0];
+  const dateIdx = headers.indexOf("Date");
+  const tsIdx = headers.indexOf("Timestamp");
+
+  const cutoff = new Date();
+  cutoff.setUTCHours(0, 0, 0, 0);
+  cutoff.setUTCDate(cutoff.getUTCDate() - CURRENT_DAYS);
+
+  const recent = [];
+  for (let i = 1; i < values.length; i++) {
+    const d = rowDate_(values[i], dateIdx, tsIdx);
+    if (d && d >= cutoff) recent.push(values[i]);
+  }
+
+  let cur = ss.getSheetByName("Current");
+  if (cur) ss.deleteSheet(cur);
+  cur = ss.insertSheet("Current", 0);
+  cur.appendRow(headers);
+  cur.setFrozenRows(1);
+  if (recent.length > 0) cur.getRange(2, 1, recent.length, recent[0].length).setValues(recent);
+  Logger.log("Seeded Current with " + recent.length + " rows from the last " + CURRENT_DAYS + " days.");
+}
+
+function doPost(e) {
+  try {
+    let data;
+    if (e.postData && e.postData.contents) {
+      data = JSON.parse(e.postData.contents);
+    } else if (e.parameter && e.parameter.data) {
+      data = JSON.parse(e.parameter.data);
+    } else {
+      throw new Error("No data received");
+    }
+
+    // ── ACTION: logFailed ────────────────────────────────────────────────
+    if (data.action === "logFailed") {
+      const ss = SpreadsheetApp.openById(SHEET_ID);
+      let failSheet = ss.getSheetByName("Failed Uploads");
+      if (!failSheet) {
+        failSheet = ss.insertSheet("Failed Uploads");
+        failSheet.appendRow([
+          "ID","Timestamp","Date","HourSlot","Store","TL",
+          "Supervisor","AM","CityManager","TotalFiles","Reason","DeviceInfo"
+        ]);
+        failSheet.getRange(1,1,1,12).setBackground("#E31E24").setFontColor("#FFFFFF").setFontWeight("bold");
+        failSheet.setFrozenRows(1);
+      }
+      failSheet.appendRow([
+        data.id, data.timestamp, data.date, data.hourSlot,
+        data.store, data.tl, data.supervisor, data.am,
+        data.cityManager, data.totalFiles, data.reason, data.deviceInfo
+      ]);
+      failSheet.getRange(failSheet.getLastRow(), 1, 1, 12).setBackground("#FFE0E0");
+      return ContentService.createTextOutput(JSON.stringify({ success: true, action: "logFailed" })).setMimeType(ContentService.MimeType.JSON);
+    }
+
+    // ── ACTION: addFile ──────────────────────────────────────────────────
+    // Saves ONE file to the hour folder. Idempotent: if a file with the same
+    // recordId+index prefix already exists, it is skipped. This makes retries
+    // safe and means no single request is ever large enough to time out.
+    if (data.action === "addFile") {
+      const hourFolder = getHourFolder(data.store, data.date, data.hourSlot);
+      const prefix = data.recordId + "__" + data.index + "__";
+      // Skip if already uploaded (idempotent retry)
+      const existing = hourFolder.getFiles();
+      while (existing.hasNext()) {
+        if (existing.next().getName().indexOf(prefix) === 0) {
+          return ContentService.createTextOutput(JSON.stringify({ success: true, skipped: true })).setMimeType(ContentService.MimeType.JSON);
+        }
+      }
+      const safeName = prefix + (data.fileName || "file");
+      const blob = Utilities.newBlob(Utilities.base64Decode(data.base64), data.mimeType, safeName);
+      const file = hourFolder.createFile(blob);
+      file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+      return ContentService.createTextOutput(JSON.stringify({ success: true })).setMimeType(ContentService.MimeType.JSON);
+    }
+
+    // ── ACTION: addChunk ─────────────────────────────────────────────────
+    // Stores one ~900KB piece of a large file (video) in a _tmp subfolder.
+    // Idempotent: a chunk that already exists is skipped. Keeps every request
+    // tiny so uploads never fail on large files.
+    if (data.action === "addChunk") {
+      const hourFolder = getHourFolder(data.store, data.date, data.hourSlot);
+      const tmp = getTmpFolder(hourFolder);
+      const chunkName = data.recordId + "__f" + data.fileIndex + "__c" + data.chunkIndex;
+      const existing = tmp.getFilesByName(chunkName);
+      if (existing.hasNext()) {
+        return ContentService.createTextOutput(JSON.stringify({ success: true, skipped: true })).setMimeType(ContentService.MimeType.JSON);
+      }
+      tmp.createFile(chunkName, data.data, "text/plain");
+      return ContentService.createTextOutput(JSON.stringify({ success: true })).setMimeType(ContentService.MimeType.JSON);
+    }
+
+    // ── ACTION: assembleFile ─────────────────────────────────────────────
+    // Reassembles all chunks of a file into the real Drive file, then deletes
+    // the temp chunks. Idempotent: if the real file already exists, it returns
+    // success. If a chunk is missing, returns success:false so the app resends.
+    if (data.action === "assembleFile") {
+      const hourFolder = getHourFolder(data.store, data.date, data.hourSlot);
+      const realPrefix = data.recordId + "__" + data.fileIndex + "__";
+      // Already assembled?
+      const check = hourFolder.getFiles();
+      while (check.hasNext()) {
+        if (check.next().getName().indexOf(realPrefix) === 0) {
+          return ContentService.createTextOutput(JSON.stringify({ success: true, alreadyExists: true })).setMimeType(ContentService.MimeType.JSON);
+        }
+      }
+      let tf = hourFolder.getFoldersByName("_tmp");
+      if (!tf.hasNext()) {
+        return ContentService.createTextOutput(JSON.stringify({ success: false, reason: "no tmp" })).setMimeType(ContentService.MimeType.JSON);
+      }
+      const tmp = tf.next();
+      let b64 = "";
+      for (let c = 0; c < data.totalChunks; c++) {
+        const cn = data.recordId + "__f" + data.fileIndex + "__c" + c;
+        const it = tmp.getFilesByName(cn);
+        if (!it.hasNext()) {
+          return ContentService.createTextOutput(JSON.stringify({ success: false, missingChunk: c })).setMimeType(ContentService.MimeType.JSON);
+        }
+        b64 += it.next().getBlob().getDataAsString();
+      }
+      const blob = Utilities.newBlob(Utilities.base64Decode(b64), data.mimeType, realPrefix + (data.fileName || "file"));
+      const real = hourFolder.createFile(blob);
+      real.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+      // Cleanup temp chunks for this file
+      for (let c = 0; c < data.totalChunks; c++) {
+        const cn = data.recordId + "__f" + data.fileIndex + "__c" + c;
+        const it = tmp.getFilesByName(cn);
+        while (it.hasNext()) it.next().setTrashed(true);
+      }
+      return ContentService.createTextOutput(JSON.stringify({ success: true })).setMimeType(ContentService.MimeType.JSON);
+    }
+
+    // ── ACTION: finalize ─────────────────────────────────────────────────
+    // Writes the Sheet row AFTER all files are uploaded. Idempotent: if a row
+    // with this ID already exists, it is not duplicated. Gathers this record's
+    // file links from the folder.
+    if (data.action === "finalize") {
+      const sheet = getCurrentSheet();
+      ensureWeekHeader(sheet);
+      // NOTE: rolling old rows to Archive is NOT done here — doing it on every
+      // submission acquired a global lock + rewrote the whole sheet, which
+      // caused "too many scripts running" at busy hours. It now runs once a day
+      // from the daily maintenance trigger (rollCurrentToArchive in purge).
+      // Idempotency: skip if this row already exists. Only scan the LAST ~1000
+      // rows' ID column — a duplicate finalize is always a retry of a very
+      // recent submission, so this avoids reading the entire (large) sheet on
+      // every write, which was exhausting the execution quota and stopping
+      // writes entirely at scale.
+      const lastRow = sheet.getLastRow();
+      if (lastRow >= 2) {
+        const from = Math.max(2, lastRow - 1000);
+        const ids = sheet.getRange(from, 1, lastRow - from + 1, 1).getValues();
+        for (let i = ids.length - 1; i >= 0; i--) {
+          if (String(ids[i][0]) === String(data.id)) {
+            return ContentService.createTextOutput(JSON.stringify({ success: true, alreadyExists: true })).setMimeType(ContentService.MimeType.JSON);
+          }
+        }
+      }
+      const hourFolder = getHourFolder(data.store, data.date, data.hourSlot);
+      // Collect this record's file links
+      const links = [];
+      const recPrefix = data.id + "__";
+      const fit = hourFolder.getFiles();
+      while (fit.hasNext()) {
+        const f = fit.next();
+        if (f.getName().indexOf(recPrefix) === 0) links.push(f.getUrl());
+      }
+      const sections = typeof data.sections === "string" ? JSON.parse(data.sections) : (data.sections || {});
+      ensureWeekHeader(sheet);
+      sheet.appendRow([
+        data.id, data.timestamp, data.date, data.hourSlot, data.store,
+        data.tl, data.supervisor, data.am, data.cityManager,
+        (sections.inside  || []).length,
+        (sections.outside || []).length,
+        (sections.parking || []).length,
+        data.totalFiles,
+        hourFolder.getUrl(),
+        links.join(", "),
+        isoWeek(data.date || data.timestamp)
+      ]);
+      return ContentService.createTextOutput(JSON.stringify({ success: true })).setMimeType(ContentService.MimeType.JSON);
+    }
+
+    // ── LEGACY: single-payload submission (kept as fallback) ─────────────
+    const sheet = getCurrentSheet();
+    const hourFolder = getHourFolder(data.store, data.date, data.hourSlot);
+    const driveLinks = [];
+    const files = typeof data.files === "string" ? JSON.parse(data.files) : (data.files || []);
+    files.forEach(f => {
+      try {
+        const blob = Utilities.newBlob(Utilities.base64Decode(f.base64), f.mimeType, f.name);
+        const driveFile = hourFolder.createFile(blob);
+        driveFile.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+        driveLinks.push(driveFile.getUrl());
+      } catch(fileErr) { console.warn("File save error:", fileErr.message); }
+    });
+    const sections = typeof data.sections === "string" ? JSON.parse(data.sections) : (data.sections || {});
+    ensureWeekHeader(sheet);
+    sheet.appendRow([
+      data.id, data.timestamp, data.date, data.hourSlot, data.store,
+      data.tl, data.supervisor, data.am, data.cityManager,
+      (sections.inside || []).length, (sections.outside || []).length, (sections.parking || []).length,
+      data.totalFiles, hourFolder.getUrl(), driveLinks.join(", "),
+      isoWeek(data.date || data.timestamp)
+    ]);
+    return ContentService.createTextOutput(JSON.stringify({ success: true })).setMimeType(ContentService.MimeType.JSON);
+
+  } catch(err) {
+    console.error("doPost error:", err.message);
+    return ContentService.createTextOutput(JSON.stringify({ error: err.message })).setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+// Build the store -> {tl, supervisor, am, cityManager} mapping from the live
+// store-list sheet. Cached 10 min in CacheService to keep responses fast.
+function getStoreMappingJSON() {
+  const cache = CacheService.getScriptCache();
+  const cached = cache.get("store_mapping_v1");
+  if (cached) return cached;
+
+  const ss = SpreadsheetApp.openById(STORE_LIST_SHEET_ID);
+  // Use Sheet1 explicitly; fall back to the first sheet if not found
+  const sheet = ss.getSheetByName("Sheet1") || ss.getSheets()[0];
+  const data = sheet.getDataRange().getValues();
+  if (data.length < 2) return JSON.stringify({ mapping: {}, order: [] });
+
+  // Locate columns by header so the layout can shift without breaking
+  const headers = data[0].map(h => String(h).trim().toLowerCase());
+  const col = (names) => {
+    for (const n of names) { const i = headers.indexOf(n); if (i !== -1) return i; }
+    return -1;
+  };
+  const cStore = col(["store", "stores", "store name", "dark store", "darkstore", "location", "site"]);
+  const cTL    = col(["tl", "tls", "team leader", "teamleader", "team lead"]);
+  const cSup   = col(["supervisor", "supervisors", "sup"]);
+  const cAM    = col(["am", "ams", "assistant manager", "asst manager", "asst. manager", "area manager"]);
+  const cCM    = col(["city manager", "citymanager", "city managers", "manager", "cm"]);
+
+  const mapping = {};
+  const order = [];
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    const store = cStore === -1 ? "" : String(row[cStore]).trim();
+    if (!store) continue; // skip blank rows
+    mapping[store] = {
+      tl:          cTL  === -1 ? "" : String(row[cTL]).trim(),
+      supervisor:  cSup === -1 ? "" : String(row[cSup]).trim(),
+      am:          cAM  === -1 ? "" : String(row[cAM]).trim(),
+      cityManager: cCM  === -1 ? "" : String(row[cCM]).trim(),
+    };
+    order.push(store);
+  }
+
+  const json = JSON.stringify({ mapping: mapping, order: order, count: order.length });
+  // Only cache a GOOD result — never poison the cache with an empty/failed read
+  if (order.length > 0) cache.put("store_mapping_v1", json, 600);
+  return json;
+}
+
+// Run from the editor to clear the 10-min store cache immediately (e.g. right
+// after you add stores to the sheet and want them live now instead of waiting).
+function clearStoreCache() {
+  CacheService.getScriptCache().remove("store_mapping_v1");
+}
+
+function doGet(e) {
+  // ── LIVE STORE LIST: ?stores ─────────────────────────────────────────
+  // Reads the store-list spreadsheet (Store | TL | Supervisor | AM | City
+  // Manager) and returns the mapping as JSON. Cached 10 min so the dashboard
+  // and upload screen stay fast. Changing that sheet updates the app
+  // automatically (within the cache window) — no redeploy needed.
+  if (e && e.parameter && e.parameter.stores !== undefined) {
+    return ContentService.createTextOutput(getStoreMappingJSON())
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+
+  // Reads/verifies come from the small, fast "Current" tab (last ~15 days).
+  const sheet = getCurrentSheet();
+
+  // ── FILE COUNT: ?fileCount=ID&store=X&date=Y&slot=Z ──────────────────
+  // Returns how many files for this record are saved in its folder so the
+  // app can confirm all files landed before finalizing.
+  if (e && e.parameter && e.parameter.fileCount) {
+    const recId = String(e.parameter.fileCount);
+    try {
+      const hourFolder = getHourFolder(e.parameter.store, e.parameter.date, e.parameter.slot);
+      const prefix = recId + "__";
+      let count = 0;
+      const fit = hourFolder.getFiles();
+      while (fit.hasNext()) {
+        if (fit.next().getName().indexOf(prefix) === 0) count++;
+      }
+      return ContentService.createTextOutput(JSON.stringify({ count: count })).setMimeType(ContentService.MimeType.JSON);
+    } catch (err) {
+      return ContentService.createTextOutput(JSON.stringify({ count: 0 })).setMimeType(ContentService.MimeType.JSON);
+    }
+  }
+
+  // ── FAST VERIFICATION: ?check=RECORD_ID ──────────────────────────────
+  if (e && e.parameter && e.parameter.check) {
+    const targetId = String(e.parameter.check);
+    const data = sheet.getDataRange().getValues();
+    const headers = data[0];
+    const idCol = headers.indexOf("ID");
+    if (idCol === -1) {
+      return ContentService.createTextOutput(JSON.stringify({ found: false })).setMimeType(ContentService.MimeType.JSON);
+    }
+    for (let i = data.length - 1; i >= 1; i--) {
+      if (String(data[i][idCol]) === targetId) {
+        return ContentService.createTextOutput(JSON.stringify({ found: true })).setMimeType(ContentService.MimeType.JSON);
+      }
+    }
+    return ContentService.createTextOutput(JSON.stringify({ found: false })).setMimeType(ContentService.MimeType.JSON);
+  }
+
+  // ── FULL DATA FETCH for dashboard ────────────────────────────────────
+  // Return only the last ~11 days (covers the app's Today/7/10-day views with a
+  // buffer). Bounds the response size regardless of how big Current gets, so
+  // the dashboard stays fast and doesn't strain the execution quota.
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0];
+  const dateIdx = headers.indexOf("Date");
+  const tsIdx = headers.indexOf("Timestamp");
+  const cutoff = new Date();
+  cutoff.setHours(0, 0, 0, 0);
+  cutoff.setDate(cutoff.getDate() - 11);
+  const rows = data.slice(1)
+    .filter(row => {
+      if (!row[0] || row[0] === 'TEST') return false;
+      let d = new Date(row[dateIdx]);
+      if (isNaN(d.getTime()) && tsIdx >= 0) d = new Date(row[tsIdx]);
+      return isNaN(d.getTime()) ? true : d >= cutoff; // keep undated rows just in case
+    })
+    .map(row => {
+      const obj = {};
+      headers.forEach((h, i) => obj[h] = row[i]);
+      return obj;
+    });
+  return ContentService
+    .createTextOutput(JSON.stringify(rows))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+function purgeOldFiles() {
+  // Daily maintenance also rolls 15-day-old rows from Current -> Archive here
+  // (moved off the per-submission path to avoid lock contention at busy hours).
+  try { rollCurrentToArchive(); } catch (e) {}
+
+  const RETENTION_DAYS = 10;
+  const rootFolder = DriveApp.getFolderById(ROOT_FOLDER_ID);
+  const now = new Date();
+  const startTime = Date.now();
+  const MAX_MS = 5 * 60 * 1000; // stop ~1 min before Apps Script's 6-min limit
+
+  // Cutoff = midnight today (UTC) minus retention. Date folders dated before
+  // this are past retention and their files get purged.
+  const cutoff = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  cutoff.setUTCDate(cutoff.getUTCDate() - RETENTION_DAYS);
+
+  // Derive a date folder's date from its NAME (e.g. "20 May 2026"); fall back
+  // to its creation time if the name isn't parseable.
+  function folderDate(folder) {
+    const byName = new Date(folder.getName());
+    if (!isNaN(byName.getTime())) return byName;
+    return folder.getDateCreated();
+  }
+
+  let totalDeleted = 0, totalFreedMB = 0, stoppedEarly = false;
+
+  const storeFolders = rootFolder.getFolders();
+  outer:
+  while (storeFolders.hasNext()) {
+    const storeFolder = storeFolders.next();
+    const dateFolders = storeFolder.getFolders();
+    while (dateFolders.hasNext()) {
+      if (Date.now() - startTime > MAX_MS) { stoppedEarly = true; break outer; }
+      const dateFolder = dateFolders.next();
+      const d = folderDate(dateFolder);
+      if (d >= cutoff) continue; // still within retention window — keep
+
+      // FILES LIVE INSIDE HOUR SUBFOLDERS: Store -> Date -> HourSlot -> files
+      // (The old code looked in the Date folder directly and found nothing,
+      //  which is why every purge logged "Nothing to delete".)
+      const hourFolders = dateFolder.getFolders();
+      while (hourFolders.hasNext()) {
+        const hourFolder = hourFolders.next();
+        // 1) delete the real files in the hour folder
+        const files = hourFolder.getFiles();
+        while (files.hasNext()) {
+          const f = files.next();
+          totalFreedMB += f.getSize() / (1024 * 1024);
+          f.setTrashed(true);
+          totalDeleted++;
+        }
+        // 2) clean any leftover _tmp chunk folders (abandoned chunked uploads)
+        const subs = hourFolder.getFolders();
+        while (subs.hasNext()) {
+          const sub = subs.next();
+          const sf = sub.getFiles();
+          while (sf.hasNext()) {
+            const cf = sf.next();
+            totalFreedMB += cf.getSize() / (1024 * 1024);
+            cf.setTrashed(true);
+            totalDeleted++;
+          }
+        }
+      }
+      // NOTE: we NEVER delete folders — they stay as a permanent audit trail
+      // of when each store submitted. Only the files inside are purged.
+    }
+  }
+
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  let purgeLog = ss.getSheetByName("Purge Log");
+  if (!purgeLog) {
+    purgeLog = ss.insertSheet("Purge Log");
+    purgeLog.appendRow(["Timestamp","Files Deleted","Space Freed (MB)","Cutoff Date","Note"]);
+  }
+  purgeLog.appendRow([
+    new Date().toISOString(),
+    totalDeleted,
+    totalFreedMB.toFixed(2),
+    cutoff.toUTCString(),
+    stoppedEarly
+      ? `Deleted ${totalDeleted} files; stopped early (time limit) — auto-resuming in ~2 min`
+      : (totalDeleted > 0
+          ? `Deleted ${totalDeleted} files older than ${RETENTION_DAYS} days`
+          : "Nothing to delete")
+  ]);
+
+  // ── SELF-RESCHEDULE ───────────────────────────────────────────────────
+  // If we ran out of time with backlog remaining, schedule a one-time trigger
+  // to resume in ~2 minutes. When a run finishes WITHOUT stopping early, the
+  // backlog is clear, so we remove any leftover catch-up triggers. This lets
+  // the purge chew through a large backlog on its own, then settle back into
+  // the normal nightly schedule.
+  if (stoppedEarly) {
+    ensureCatchUpTrigger();
+  } else {
+    clearCatchUpTriggers();
+  }
+}
+
+// Create a one-time "resume in ~2 min" trigger, but only if one isn't already
+// pending (avoids stacking duplicates).
+function ensureCatchUpTrigger() {
+  const existing = ScriptApp.getProjectTriggers()
+    .filter(t => t.getHandlerFunction() === "purgeCatchUp");
+  if (existing.length > 0) return;
+  ScriptApp.newTrigger("purgeCatchUp").timeBased().after(2 * 60 * 1000).create();
+}
+
+// Remove all pending one-time catch-up triggers (called when backlog is clear).
+function clearCatchUpTriggers() {
+  ScriptApp.getProjectTriggers()
+    .filter(t => t.getHandlerFunction() === "purgeCatchUp")
+    .forEach(t => ScriptApp.deleteTrigger(t));
+}
+
+// The catch-up entry point fired by the one-time trigger. It removes the
+// trigger that invoked it (one-time triggers don't auto-delete), then runs
+// the purge again — which will re-schedule itself if there's still backlog.
+function purgeCatchUp() {
+  clearCatchUpTriggers();
+  purgeOldFiles();
+}
+
+function testSheet() {
+  const sheet = getCurrentSheet();
+  sheet.appendRow(["TEST", new Date().toISOString(), "Connection OK"]);
+}
+
+// ── WHATSAPP ALERTS (free via CallMeBot) ────────────────────────────────
+// SETUP (one-time, 2 minutes):
+// 1. Save +34 644 51 95 23 ("CallMeBot") to your phone contacts
+// 2. Send this WhatsApp message to it: "I allow callmebot to send me messages"
+// 3. You'll receive an API key. Paste it into WHATSAPP_API_KEY below
+// 4. Put your number (with country code, no +) into WHATSAPP_PHONE
+const WHATSAPP_PHONE = "971500000000";        // ← your number, e.g. 9715XXXXXXXX
+const WHATSAPP_API_KEY = "PASTE_YOUR_KEY";    // ← key from CallMeBot
+
+function sendWhatsApp(message) {
+  if (WHATSAPP_API_KEY === "PASTE_YOUR_KEY") {
+    console.warn("WhatsApp not configured — skipping alert");
+    return;
+  }
+  try {
+    const url = "https://api.callmebot.com/whatsapp.php"
+      + "?phone=" + WHATSAPP_PHONE
+      + "&text=" + encodeURIComponent(message)
+      + "&apikey=" + WHATSAPP_API_KEY;
+    UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+  } catch (err) {
+    console.error("WhatsApp send failed:", err.message);
+  }
+}
+
+// Daily flagged-store digest — run via a trigger (e.g. once at 6 PM)
+// Counts how many slots each store missed today and WhatsApps a summary
+function sendDailyFlaggedAlert() {
+  const sheet = getCurrentSheet();
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0];
+  const dateCol = headers.indexOf("Date");
+  const storeCol = headers.indexOf("Store");
+  if (dateCol === -1 || storeCol === -1) return;
+
+  // Today's date in "DD Mon YYYY" to match how the app stores it
+  const now = new Date();
+  const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  const todayStr = String(now.getDate()).padStart(2,"0") + " " + months[now.getMonth()] + " " + now.getFullYear();
+
+  // Count submissions per store today
+  const counts = {};
+  for (let i = 1; i < data.length; i++) {
+    const rowDate = data[i][dateCol];
+    let normalized = rowDate;
+    try {
+      const d = new Date(rowDate);
+      if (!isNaN(d.getTime())) {
+        normalized = String(d.getDate()).padStart(2,"0") + " " + months[d.getMonth()] + " " + d.getFullYear();
+      }
+    } catch (e) {}
+    if (normalized === todayStr) {
+      const store = data[i][storeCol];
+      counts[store] = (counts[store] || 0) + 1;
+    }
+  }
+
+  // Expected slots elapsed so far today (8AM–10PM = 14 slots)
+  const hour = now.getHours();
+  let elapsed = 0;
+  if (hour >= 8 && hour < 22) elapsed = hour - 8;
+  else if (hour >= 22) elapsed = 14;
+  if (elapsed === 0) return; // too early to flag
+
+  // Find stores below 90% adherence
+  const flagged = [];
+  for (const store in counts) {
+    const pct = Math.round((counts[store] / elapsed) * 100);
+    if (pct < 90) flagged.push(store + " (" + pct + "%)");
+  }
+
+  if (flagged.length === 0) {
+    sendWhatsApp("✅ noon Minutes — All stores meeting 90% adherence as of " + hour + ":00. Great work!");
+  } else {
+    const msg = "⚠️ noon Minutes — Flagged stores (below 90%) as of " + hour + ":00:\n\n"
+      + flagged.slice(0, 30).join("\n")
+      + (flagged.length > 30 ? "\n\n…and " + (flagged.length - 30) + " more" : "");
+    sendWhatsApp(msg);
+  }
+}
