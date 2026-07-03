@@ -13,6 +13,10 @@ export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
 export type Json = string | number | boolean | null | { [key: string]: Json } | Json[]
 
 export type UserRole = 'rider' | 'associate' | 'admin'
+
+// Roles allowed to access the admin dashboard (everyone except riders).
+export const STAFF_ROLES = ['admin', 'associate', 'trainer', 'supervisor', 'area_manager', 'city_manager']
+
 export type SessionStatus =
   | 'waiting' | 'assigned' | 'accepted' | 'pickup_done'
   | 'in_transit' | 'arrived' | 'delivered' | 'returning' | 'completed' | 'failed'

@@ -1,9 +1,10 @@
 'use client'
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { supabase } from '@/lib/supabase'
+import { supabase, STAFF_ROLES } from '@/lib/supabase'
 import Sidebar from '@/components/layout/Sidebar'
 import { Menu } from 'lucide-react'
+import toast from 'react-hot-toast'
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter()
@@ -11,10 +12,19 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const [sidebarOpen, setSidebarOpen] = useState(false)
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => {
-      if (!data.session) router.replace('/login')
-      else setChecking(false)
-    })
+    (async () => {
+      const { data } = await supabase.auth.getSession()
+      if (!data.session) { router.replace('/login'); return }
+      const { data: profile } = await supabase
+        .from('profiles').select('role').eq('id', data.session.user.id).maybeSingle()
+      if (!profile || !STAFF_ROLES.includes(profile.role)) {
+        await supabase.auth.signOut()
+        toast.error('Admin access required — riders should use the mobile app.')
+        router.replace('/login')
+        return
+      }
+      setChecking(false)
+    })()
   }, [router])
 
   if (checking) {

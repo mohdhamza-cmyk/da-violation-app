@@ -2,7 +2,7 @@
 export const dynamic = 'force-dynamic'
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { supabase } from '@/lib/supabase'
+import { supabase, STAFF_ROLES } from '@/lib/supabase'
 import toast from 'react-hot-toast'
 
 export default function LoginPage() {
@@ -15,8 +15,14 @@ export default function LoginPage() {
     e.preventDefault()
     setLoading(true)
     try {
-      const { error } = await supabase.auth.signInWithPassword({ email, password })
+      const { data, error } = await supabase.auth.signInWithPassword({ email, password })
       if (error) throw error
+      const { data: profile } = await supabase
+        .from('profiles').select('role').eq('id', data.user!.id).maybeSingle()
+      if (!profile || !STAFF_ROLES.includes(profile.role)) {
+        await supabase.auth.signOut()
+        throw new Error('This dashboard is for admins and staff only. Riders should use the mobile app.')
+      }
       router.push('/dashboard')
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : 'Login failed')
