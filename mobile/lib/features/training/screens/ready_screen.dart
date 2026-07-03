@@ -27,7 +27,11 @@ class _ReadyScreenState extends State<ReadyScreen> {
 
   Future<void> _checkActiveSession() async {
     final session = await SupabaseService.getActiveSession();
-    if (session != null && mounted) {
+    // Only auto-resume a brand-new order (queued or just assigned). A mid-flow
+    // session is not resumed here — tapping Ready starts a fresh run instead —
+    // so the rider is never dropped into the middle of an old delivery.
+    if (session != null && mounted &&
+        (session.status == 'waiting' || session.status == 'assigned')) {
       _navigateByStatus(session.id, session.status);
     }
   }

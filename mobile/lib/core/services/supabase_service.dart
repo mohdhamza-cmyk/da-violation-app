@@ -68,6 +68,14 @@ class SupabaseService {
   }
 
   static Future<void> setWaiting(String storeId) async {
+    // Each "Ready for Training" starts a fresh run — abandon any prior
+    // unfinished session so the rider is never dropped mid-flow.
+    await _client
+        .from('training_sessions')
+        .update({'status': 'failed'})
+        .eq('rider_id', userId!)
+        .not('status', 'in', '("completed","failed")');
+
     await _client.from('training_sessions').insert({
       'rider_id': userId,
       'store_id': storeId,
