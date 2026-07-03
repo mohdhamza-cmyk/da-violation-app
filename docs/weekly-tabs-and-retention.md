@@ -16,14 +16,22 @@ formatting + frozen row).
 
 ## The daily roll — `rollCurrentToWeeklyTabs()`
 
-Runs once a day from `purgeOldFiles()`. Under a script lock it:
-1. Reads `Current`, splits rows into **keep** (≤10 days) and **aged** (>10 days).
+Runs daily from `purgeOldFiles()`. Under a script lock it:
+1. Reads `Current`, classifies rows as **keep** (≤10 days) or **aged** (>10 days).
 2. Groups aged rows by ISO week and **appends** each group to its `YYYY-Www` tab
-   (creating the tab with headers if new).
-3. Rewrites `Current` with the header + kept rows.
+   (creating the tab with headers if new), oldest weeks first.
+3. Rewrites `Current` with the header + every row not moved this run, in the
+   original order.
 
-Because aged rows are removed from `Current` as they're filed, they're never
-re-processed — no duplicates under normal operation.
+**Batched + resumable.** It files at most `ROLL_WEEKS_PER_RUN` (8) weeks per run
+under a ~3-minute budget, then returns `true` if aged rows remain. When that
+happens (e.g. the very first roll against a huge backlogged `Current`),
+`purgeOldFiles` schedules a ~2-minute catch-up trigger that resumes it
+automatically until the backlog is clear — the same self-healing pattern the
+file purge uses. This is why the first roll after go-live can't silently time
+out. **Idempotent:** rows whose ID already exists in the target week tab are not
+re-appended, so a partial run that failed before rewriting `Current` can't
+create duplicates.
 
 ## One-time migration — `migrateSheet1ToWeeklyTabs()`
 

@@ -112,51 +112,110 @@ function rowDate_(row, dateIdx, tsIdx) {
 }
 
 // Move rows older than CURRENT_DAYS from Current into their ISO-week tabs.
-// Runs once daily (from purgeOldFiles). Locked so it never overlaps a write.
-// APPEND-ONLY to weekly tabs; Current is rewritten with the kept recent rows
-// (clearContents preserves header formatting + frozen row).
+// Runs daily from purgeOldFiles. Locked so it never overlaps a submission write.
+//
+// BATCHED + RESUMABLE: files at most ROLL_WEEKS_PER_RUN weeks per run under a
+// time budget, so the FIRST roll against a huge Current (e.g. tens of thousands
+// of backlogged rows) can't overrun the Spreadsheet service the way an all-at-
+// once run would ("Service Spreadsheets timed out"). Returns true when aged rows
+// still remain — purgeOldFiles then schedules a ~2-min catch-up run, which
+// chews through the backlog automatically until it's clear.
+//
+// APPEND-ONLY to weekly tabs (never rewritten); only Current is rewritten, and
+// in original row order minus exactly the rows moved this run. Idempotent: rows
+// whose ID already exists in the target week tab are not re-appended, so a
+// partial run that failed before rewriting Current can't create duplicates.
 function rollCurrentToWeeklyTabs() {
+  const ROLL_WEEKS_PER_RUN = 8;
+  const MAX_MS = 3 * 60 * 1000; // leave headroom for the file purge in the same execution
+  const startTime = Date.now();
+
   const lock = LockService.getScriptLock();
-  try { lock.waitLock(10000); } catch (e) { return; } // if busy, skip this cycle
+  try { lock.waitLock(10000); } catch (e) { return false; } // busy — try next cycle
   try {
-    const cur = getCurrentSheet();
-    if (cur.getLastRow() < 2) return;
+    const ss = SpreadsheetApp.openById(SHEET_ID);
+    const cur = ss.getSheetByName("Current") || getCurrentSheet();
+    if (cur.getLastRow() < 2) return false;
     const values = cur.getDataRange().getValues();
     const headers = values[0];
+    const rows = values.slice(1);
     const dateIdx = headers.indexOf("Date");
     const tsIdx = headers.indexOf("Timestamp");
+    const idIdx = headers.indexOf("ID");
     const cutoff = new Date();
     cutoff.setUTCHours(0, 0, 0, 0);
     cutoff.setUTCDate(cutoff.getUTCDate() - CURRENT_DAYS);
 
-    const keep = [];
-    const byWeek = {}; // weekLabel -> rows[]
-    for (let i = 1; i < values.length; i++) {
-      const row = values[i];
-      const d = rowDate_(row, dateIdx, tsIdx);
+    // Classify aged rows, keeping their original index so we can preserve order.
+    const agedByWeek = {}; // weekLabel -> [{idx, row}]
+    for (let i = 0; i < rows.length; i++) {
+      const d = rowDate_(rows[i], dateIdx, tsIdx);
       if (d && d < cutoff) {
-        const wk = isoWeek(row[dateIdx] || (tsIdx >= 0 ? row[tsIdx] : "")) || "Undated";
-        (byWeek[wk] = byWeek[wk] || []).push(row);
-      } else {
-        keep.push(row);
+        const wk = isoWeek(rows[i][dateIdx] || (tsIdx >= 0 ? rows[i][tsIdx] : "")) || "Undated";
+        (agedByWeek[wk] = agedByWeek[wk] || []).push({ idx: i, row: rows[i] });
       }
     }
-    const weeks = Object.keys(byWeek);
-    if (weeks.length === 0) return; // nothing to roll
+    const weeks = Object.keys(agedByWeek).sort(); // oldest weeks first
+    if (weeks.length === 0) return false; // nothing to roll
 
-    // Append moved rows into their week tabs (append-only, never rewritten).
-    weeks.forEach(function (wk) {
-      const rows = byWeek[wk];
-      const sh = getWeekSheet(wk);
-      sh.getRange(sh.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
-    });
+    function withRetry(fn) {
+      for (let a = 0; a < 3; a++) {
+        try { return fn(); }
+        catch (e) { if (a === 2) throw e; Utilities.sleep(1200 * (a + 1)); }
+      }
+    }
+    function weekSheet(label) {
+      let sh = ss.getSheetByName(label);
+      if (sh) return sh;
+      sh = ss.insertSheet(label);
+      sh.appendRow(SHEET_HEADERS);
+      sh.setFrozenRows(1);
+      return sh;
+    }
 
-    // Rewrite Current with header + kept (recent) rows. Only Current is ever
-    // rewritten — the weekly tabs above are left untouched.
+    const moved = {};          // original row idx -> true (remove from Current)
+    let processedWeeks = 0, moreRemaining = false;
+
+    for (let w = 0; w < weeks.length; w++) {
+      const wk = weeks[w];
+      const entries = agedByWeek[wk];
+      if (processedWeeks >= ROLL_WEEKS_PER_RUN || Date.now() - startTime > MAX_MS) {
+        moreRemaining = true; // defer this week's rows to a later run (stay in Current)
+        continue;
+      }
+      const sh = withRetry(function () { return weekSheet(wk); });
+      const existing = {};
+      if (idIdx >= 0 && sh.getLastRow() >= 2) {
+        const ids = withRetry(function () {
+          return sh.getRange(2, idIdx + 1, sh.getLastRow() - 1, 1).getValues();
+        });
+        for (let k = 0; k < ids.length; k++) existing[String(ids[k][0])] = true;
+      }
+      const toAppend = [];
+      entries.forEach(function (e) {
+        moved[e.idx] = true; // this week is processed → row leaves Current either way
+        const id = idIdx >= 0 ? String(e.row[idIdx]) : "";
+        if (id && existing[id]) return; // already filed by a prior partial run
+        toAppend.push(e.row);
+      });
+      if (toAppend.length > 0) {
+        withRetry(function () {
+          sh.getRange(sh.getLastRow() + 1, 1, toAppend.length, toAppend[0].length).setValues(toAppend);
+        });
+      }
+      SpreadsheetApp.flush();
+      processedWeeks++;
+    }
+
+    // Rewrite Current = header + every row not moved this run, in original order
+    // (recent rows + any aged rows we deferred). clearContents keeps formatting.
+    const keep = [];
+    for (let i = 0; i < rows.length; i++) if (!moved[i]) keep.push(rows[i]);
     cur.clearContents();
     cur.getRange(1, 1, 1, headers.length).setValues([headers]);
     if (keep.length > 0) cur.getRange(2, 1, keep.length, keep[0].length).setValues(keep);
     cur.setFrozenRows(1);
+    return moreRemaining;
   } finally {
     try { lock.releaseLock(); } catch (e) {}
   }
@@ -645,8 +704,10 @@ function doGet(e) {
 function purgeOldFiles() {
   // Daily maintenance also files rows older than CURRENT_DAYS from Current into
   // their immutable weekly tabs here (moved off the per-submission path to
-  // avoid lock contention at busy hours).
-  try { rollCurrentToWeeklyTabs(); } catch (e) {}
+  // avoid lock contention at busy hours). The roll is batched and returns true
+  // when aged rows still remain, so we resume it via the catch-up trigger below.
+  let rollMore = false;
+  try { rollMore = rollCurrentToWeeklyTabs(); } catch (e) {}
 
   const RETENTION_DAYS = 10;
   const rootFolder = DriveApp.getFolderById(ROOT_FOLDER_ID);
@@ -731,12 +792,11 @@ function purgeOldFiles() {
   ]);
 
   // ── SELF-RESCHEDULE ───────────────────────────────────────────────────
-  // If we ran out of time with backlog remaining, schedule a one-time trigger
-  // to resume in ~2 minutes. When a run finishes WITHOUT stopping early, the
-  // backlog is clear, so we remove any leftover catch-up triggers. This lets
-  // the purge chew through a large backlog on its own, then settle back into
-  // the normal nightly schedule.
-  if (stoppedEarly) {
+  // If the file purge OR the weekly roll still has backlog, schedule a one-time
+  // trigger to resume in ~2 minutes. When both finish clean, remove any leftover
+  // catch-up triggers. This lets a large backlog (files AND the first big roll)
+  // chew through on its own, then settle back into the normal nightly schedule.
+  if (stoppedEarly || rollMore) {
     ensureCatchUpTrigger();
   } else {
     clearCatchUpTriggers();
