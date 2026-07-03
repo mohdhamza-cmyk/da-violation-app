@@ -17,7 +17,7 @@ begin
     where is_active order by random() limit 1; end if;
   update public.training_sessions
      set status='assigned', assigned_at=now(), mot=v_mot,
-         difficulty = case v_mot when 'walker' then 'easy' when 'cyclist' then 'medium' else 'hard' end,
+         difficulty = (case v_mot when 'walker' then 'easy' when 'cyclist' then 'medium' else 'hard' end)::difficulty_level,
          location_id = coalesce(v_loc, location_id)
    where id = new.id and status='waiting';
   return new;
