@@ -1,7 +1,7 @@
 'use client'
 export const dynamic = 'force-dynamic'
 import { useEffect, useState, useCallback } from 'react'
-import { supabase } from '@/lib/supabase'
+import { supabase, Mot, MOT_LABEL, MOT_STYLE } from '@/lib/supabase'
 import { Send, RefreshCw, Zap, XCircle } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { formatDistanceToNow } from 'date-fns'
@@ -11,7 +11,7 @@ interface WaitingSession {
   order_code: string
   created_at: string
   location_id: string | null
-  profiles?: { full_name: string; employee_id: string } | null
+  profiles?: { full_name: string; employee_id: string; mot?: Mot } | null
   stores?: { name: string } | null
   training_locations?: { name: string; landmark: string | null } | null
 }
@@ -35,7 +35,7 @@ export default function AssignPage() {
     const [sessionsRes, locsRes] = await Promise.all([
       supabase
         .from('training_sessions')
-        .select('id, order_code, created_at, location_id, profiles!rider_id(full_name, employee_id), stores(name), training_locations(name, landmark)')
+        .select('id, order_code, created_at, location_id, profiles!rider_id(full_name, employee_id, mot), stores(name), training_locations(name, landmark)')
         .eq('status', 'waiting')
         .order('created_at', { ascending: true }),
       supabase
@@ -143,9 +143,10 @@ export default function AssignPage() {
                     waiting {formatDistanceToNow(new Date(s.created_at), { addSuffix: true })}
                   </span>
                 </div>
-                <div className="text-sm text-gray-700 mt-1">
-                  {s.profiles?.full_name ?? 'Rider'} <span className="text-gray-400">({s.profiles?.employee_id ?? '—'})</span>
-                  {s.stores?.name ? <> · <span className="text-gray-500">{s.stores.name}</span></> : null}
+                <div className="text-sm text-gray-700 mt-1 flex items-center gap-2 flex-wrap">
+                  <span>{s.profiles?.full_name ?? 'Rider'} <span className="text-gray-400">({s.profiles?.employee_id ?? '—'})</span></span>
+                  {s.profiles?.mot && <span className={`badge ${MOT_STYLE[s.profiles.mot]}`}>{MOT_LABEL[s.profiles.mot]}</span>}
+                  {s.stores?.name ? <span className="text-gray-500">· {s.stores.name}</span> : null}
                 </div>
               </div>
               <select

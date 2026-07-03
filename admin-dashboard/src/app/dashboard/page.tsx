@@ -1,7 +1,7 @@
 'use client'
 export const dynamic = 'force-dynamic'
 import { useEffect, useState, useCallback } from 'react'
-import { supabase, ActiveOrder, SessionStatus } from '@/lib/supabase'
+import { supabase, ActiveOrder, SessionStatus, MOT_LABEL, MOT_STYLE } from '@/lib/supabase'
 import { formatDistanceToNow } from 'date-fns'
 import { Activity, CheckCircle, Clock, Users } from 'lucide-react'
 
@@ -128,7 +128,7 @@ export default function LiveDashboard() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="bg-gray-50 text-left">
-                  {['Order', 'Rider', 'Store', 'Location', 'Status', 'Elapsed', 'Assigned'].map(h => (
+                  {['Order', 'Rider', 'MOT', 'Store', 'Location', 'Status', 'Elapsed', 'Assigned'].map(h => (
                     <th key={h} className="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">{h}</th>
                   ))}
                 </tr>
@@ -143,6 +143,11 @@ export default function LiveDashboard() {
                       <td className="px-4 py-3">
                         <p className="font-medium text-gray-900">{order.rider_name}</p>
                         <p className="text-xs text-gray-400">{order.employee_id}</p>
+                      </td>
+                      <td className="px-4 py-3">
+                        {order.mot
+                          ? <span className={`badge ${MOT_STYLE[order.mot]}`}>{MOT_LABEL[order.mot]}</span>
+                          : <span className="text-gray-300">—</span>}
                       </td>
                       <td className="px-4 py-3">
                         <p className="text-gray-700">{order.store_name}</p>

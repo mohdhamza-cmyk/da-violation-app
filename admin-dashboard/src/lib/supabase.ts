@@ -22,6 +22,16 @@ export type SessionStatus =
   | 'in_transit' | 'arrived' | 'delivered' | 'returning' | 'completed' | 'failed'
 export type DifficultyLevel = 'easy' | 'medium' | 'hard'
 
+// Mode of Transport — replaces the difficulty tiers in the UI.
+export type Mot = 'walker' | 'cyclist' | 'rider'
+export const MOT_VALUES: Mot[] = ['walker', 'cyclist', 'rider']
+export const MOT_LABEL: Record<Mot, string> = { walker: 'Walker', cyclist: 'Cyclist', rider: 'Rider' }
+export const MOT_STYLE: Record<Mot, string> = {
+  walker: 'bg-emerald-100 text-emerald-700',
+  cyclist: 'bg-amber-100 text-amber-700',
+  rider: 'bg-blue-100 text-blue-700',
+}
+
 export interface Store {
   id: string
   store_code: string
@@ -40,6 +50,7 @@ export interface Profile {
   employee_id: string
   full_name: string
   role: UserRole
+  mot?: Mot
   store_id?: string
   phone?: string
   is_active: boolean
@@ -58,6 +69,7 @@ export interface TrainingLocation {
   longitude: number
   expected_duration: number
   difficulty: DifficultyLevel
+  mot: Mot
   geofence_radius_meters: number
   is_active: boolean
   created_at: string
@@ -74,6 +86,7 @@ export interface TrainingSession {
   assigned_by?: string
   status: SessionStatus
   difficulty: DifficultyLevel
+  mot?: Mot
   assigned_at: string
   accepted_at?: string
   pickup_completed_at?: string
@@ -135,6 +148,7 @@ export interface ActiveOrder {
   order_code: string
   status: SessionStatus
   difficulty: DifficultyLevel
+  mot?: Mot
   assigned_at: string
   accepted_at?: string
   pickup_completed_at?: string
@@ -157,6 +171,7 @@ export interface RiderPerformance {
   full_name: string
   employee_id: string
   is_active: boolean
+  mot?: Mot
   current_store?: string
   store_id?: string
   total_sessions: number

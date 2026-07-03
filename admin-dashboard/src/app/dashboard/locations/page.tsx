@@ -1,21 +1,19 @@
 'use client'
 export const dynamic = 'force-dynamic'
 import { useEffect, useState, useCallback } from 'react'
-import { supabase, TrainingLocation, Store, DifficultyLevel } from '@/lib/supabase'
+import { supabase, TrainingLocation, Store, Mot, MOT_VALUES, MOT_LABEL, MOT_STYLE } from '@/lib/supabase'
 import { MapPin, Plus, Pencil, ToggleLeft, ToggleRight, Clock } from 'lucide-react'
 import toast from 'react-hot-toast'
 import BulkUpload from '@/components/BulkUpload'
 
-const DIFF_COLORS: Record<DifficultyLevel, string> = {
-  easy: 'bg-green-100 text-green-700',
-  medium: 'bg-yellow-100 text-yellow-700',
-  hard: 'bg-red-100 text-red-700',
-}
+// MOT ↔ difficulty backing (difficulty stays for scoring)
+const MOT_TO_DIFF: Record<Mot, 'easy' | 'medium' | 'hard'> = { walker: 'easy', cyclist: 'medium', rider: 'hard' }
+function parseMot(v?: string): Mot { const s = (v ?? '').trim().toLowerCase(); return (MOT_VALUES as string[]).includes(s) ? s as Mot : 'cyclist' }
 
 const EMPTY_LOC = {
   name: '', latitude: 0, longitude: 0, landmark: '', notes: '',
-  difficulty: 'easy' as DifficultyLevel, expected_duration: 10,
-  geofence_radius_meters: 50, store_id: '', is_active: true
+  mot: 'walker' as Mot, expected_duration: 10,
+  geofence_radius_meters: 50, store_id: '', is_active: true,
 }
 
 export default function LocationsPage() {
@@ -24,7 +22,7 @@ export default function LocationsPage() {
   const [loading, setLoading] = useState(true)
   const [editing, setEditing] = useState<Partial<TrainingLocation> | null>(null)
   const [isNew, setIsNew] = useState(false)
-  const [filterDiff, setFilterDiff] = useState<string>('all')
+  const [filterMot, setFilterMot] = useState<string>('all')
 
   const loadData = useCallback(async () => {
     const [locsRes, storesRes] = await Promise.all([
@@ -38,16 +36,18 @@ export default function LocationsPage() {
 
   useEffect(() => { loadData() }, [loadData])
 
-  const filtered = filterDiff === 'all' ? locations : locations.filter(l => l.difficulty === filterDiff)
+  const filtered = filterMot === 'all' ? locations : locations.filter(l => l.mot === filterMot)
 
   async function handleSave() {
     if (!editing) return
     if (!editing.name || !editing.latitude || !editing.longitude) {
       toast.error('Name, latitude and longitude are required'); return
     }
+    const mot = (editing.mot ?? 'walker') as Mot
     const payload = {
       name: editing.name, latitude: editing.latitude, longitude: editing.longitude,
-      landmark: editing.landmark, notes: editing.notes, difficulty: editing.difficulty,
+      landmark: editing.landmark, notes: editing.notes,
+      mot, difficulty: MOT_TO_DIFF[mot],
       expected_duration: editing.expected_duration,
       geofence_radius_meters: editing.geofence_radius_meters ?? 50,
       store_id: editing.store_id || null, is_active: editing.is_active ?? true,
@@ -84,13 +84,14 @@ export default function LocationsPage() {
         const { data } = await supabase.from('stores').select('id').eq('store_code', row.store_code.trim()).single()
         storeId = data?.id ?? null
       }
+      const mot = parseMot(row.mot)
       const { error } = await supabase.from('training_locations').insert({
         name: row.name.trim(),
         latitude: parseFloat(row.latitude),
         longitude: parseFloat(row.longitude),
         landmark: row.landmark?.trim() || null,
         notes: row.notes?.trim() || null,
-        difficulty: (['easy', 'medium', 'hard'].includes(row.difficulty) ? row.difficulty : 'easy') as DifficultyLevel,
+        mot, difficulty: MOT_TO_DIFF[mot],
         expected_duration: parseInt(row.expected_duration) || 10,
         geofence_radius_meters: parseInt(row.geofence_radius_meters) || 50,
         store_id: storeId,
@@ -108,15 +109,16 @@ export default function LocationsPage() {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Training Locations</h1>
-          <p className="text-gray-500 text-sm mt-0.5">{locations.length} delivery destinations configured</p>
+          <p className="text-gray-500 text-sm mt-0.5">{locations.length} delivery destinations · tagged by mode of transport</p>
         </div>
         <div className="flex gap-2">
           <BulkUpload
             label="Locations"
-            templateHeaders={['name', 'latitude', 'longitude', 'landmark', 'notes', 'difficulty', 'expected_duration', 'geofence_radius_meters', 'store_code']}
+            templateHeaders={['name', 'latitude', 'longitude', 'landmark', 'notes', 'mot', 'expected_duration', 'geofence_radius_meters', 'store_code']}
             templateExample={[
-              { name: 'Al Barsha Mall', latitude: '25.1122', longitude: '55.1993', landmark: 'Near entrance gate', notes: 'Parking available', difficulty: 'easy', expected_duration: '15', geofence_radius_meters: '50', store_code: 'DS-001' },
-              { name: 'JLT Tower 5', latitude: '25.0657', longitude: '55.1385', landmark: 'Blue building', notes: 'Elevator required', difficulty: 'medium', expected_duration: '20', geofence_radius_meters: '50', store_code: 'DS-002' },
+              { name: 'Al Barsha Mall', latitude: '25.1122', longitude: '55.1993', landmark: 'Near entrance gate', notes: 'Short walk', mot: 'walker', expected_duration: '8', geofence_radius_meters: '40', store_code: 'DS-001' },
+              { name: 'JLT Cluster D', latitude: '25.0680', longitude: '55.1410', landmark: 'Blue tower', notes: 'Cycle path', mot: 'cyclist', expected_duration: '15', geofence_radius_meters: '50', store_code: 'DS-001' },
+              { name: 'Business Bay Bridge', latitude: '25.1860', longitude: '55.2620', landmark: 'Main road', notes: 'Motorbike route', mot: 'rider', expected_duration: '22', geofence_radius_meters: '60', store_code: 'DS-001' },
             ]}
             onUpload={handleBulkUpload}
           />
@@ -126,14 +128,14 @@ export default function LocationsPage() {
         </div>
       </div>
 
-      {/* Filters */}
+      {/* MOT filter */}
       <div className="flex gap-2 flex-wrap">
-        {['all', 'easy', 'medium', 'hard'].map(d => (
-          <button key={d} onClick={() => setFilterDiff(d)}
+        {['all', ...MOT_VALUES].map(m => (
+          <button key={m} onClick={() => setFilterMot(m)}
             className={`px-4 py-1.5 rounded-full text-sm font-medium border transition-colors ${
-              filterDiff === d ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300'
+              filterMot === m ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300'
             }`}>
-            {d.charAt(0).toUpperCase() + d.slice(1)}
+            {m === 'all' ? 'All' : MOT_LABEL[m as Mot]}
           </button>
         ))}
       </div>
@@ -141,6 +143,8 @@ export default function LocationsPage() {
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
         {loading ? (
           <div className="col-span-3 p-12 text-center text-gray-400">Loading…</div>
+        ) : filtered.length === 0 ? (
+          <div className="col-span-3 p-12 text-center text-gray-400">No locations yet. Add them one by one or bulk-upload a CSV.</div>
         ) : filtered.map(loc => (
           <div key={loc.id} className={`bg-white rounded-xl border shadow-sm p-5 ${loc.is_active ? 'border-gray-200' : 'border-gray-100 opacity-60'}`}>
             <div className="flex items-start justify-between mb-3">
@@ -168,8 +172,8 @@ export default function LocationsPage() {
             </div>
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <span className={`badge ${DIFF_COLORS[loc.difficulty]}`}>
-                  {loc.difficulty.charAt(0).toUpperCase() + loc.difficulty.slice(1)}
+                <span className={`badge ${MOT_STYLE[loc.mot] ?? 'bg-gray-100 text-gray-600'}`}>
+                  {MOT_LABEL[loc.mot] ?? loc.mot}
                 </span>
                 <span className="text-xs text-gray-400 flex items-center gap-1">
                   <Clock className="w-3 h-3" /> {loc.expected_duration} min
@@ -215,12 +219,10 @@ export default function LocationsPage() {
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Difficulty</label>
-                <select value={editing.difficulty ?? 'easy'} className="input-field"
-                  onChange={e => setEditing(p => ({ ...p, difficulty: e.target.value as DifficultyLevel }))}>
-                  <option value="easy">Easy</option>
-                  <option value="medium">Medium</option>
-                  <option value="hard">Hard</option>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Mode of Transport</label>
+                <select value={editing.mot ?? 'walker'} className="input-field"
+                  onChange={e => setEditing(p => ({ ...p, mot: e.target.value as Mot }))}>
+                  {MOT_VALUES.map(m => <option key={m} value={m}>{MOT_LABEL[m]}</option>)}
                 </select>
               </div>
               <div>
@@ -236,7 +238,7 @@ export default function LocationsPage() {
                   onChange={e => setEditing(p => ({ ...p, geofence_radius_meters: parseInt(e.target.value) }))} />
               </div>
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Store (optional)</label>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Store</label>
                 <select value={editing.store_id ?? ''} className="input-field"
                   onChange={e => setEditing(p => ({ ...p, store_id: e.target.value }))}>
                   <option value="">All Stores</option>
