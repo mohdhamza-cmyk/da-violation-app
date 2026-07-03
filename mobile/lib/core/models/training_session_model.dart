@@ -6,7 +6,8 @@ class TrainingSessionModel {
   final String locationId;
   final String? assignedBy;
   final String status;
-  final String difficulty;
+  final String? difficulty;
+  final String? mot;
   final DateTime assignedAt;
   final DateTime? acceptedAt;
   final DateTime? pickupCompletedAt;
@@ -43,7 +44,8 @@ class TrainingSessionModel {
     required this.locationId,
     this.assignedBy,
     required this.status,
-    required this.difficulty,
+    this.difficulty,
+    this.mot,
     required this.assignedAt,
     this.acceptedAt,
     this.pickupCompletedAt,
@@ -82,7 +84,8 @@ class TrainingSessionModel {
       locationId: json['location_id'] as String,
       assignedBy: json['assigned_by'] as String?,
       status: json['status'] as String,
-      difficulty: json['difficulty'] as String,
+      difficulty: json['difficulty'] as String?,
+      mot: json['mot'] as String?,
       assignedAt: DateTime.parse(json['assigned_at'] as String),
       acceptedAt: json['accepted_at'] != null ? DateTime.parse(json['accepted_at'] as String) : null,
       pickupCompletedAt: json['pickup_completed_at'] != null ? DateTime.parse(json['pickup_completed_at'] as String) : null,

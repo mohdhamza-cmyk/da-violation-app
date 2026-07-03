@@ -45,11 +45,24 @@ class _AcceptOrderScreenState extends State<AcceptOrderScreen> {
     }
   }
 
-  Color _diffColor(String? diff) {
+  // Mode of Transport, falling back to the difficulty backing if mot is unset.
+  String _motOf(String? mot, String? diff) {
+    if (mot != null && mot.isNotEmpty) return mot;
     switch (diff) {
-      case 'easy': return const Color(0xFF16A34A);
-      case 'medium': return const Color(0xFFD97706);
-      case 'hard': return const Color(0xFFDC2626);
+      case 'easy': return 'walker';
+      case 'medium': return 'cyclist';
+      case 'hard': return 'rider';
+      default: return '';
+    }
+  }
+
+  String _motLabel(String? mot, String? diff) => _motOf(mot, diff).toUpperCase();
+
+  Color _motColor(String? mot, String? diff) {
+    switch (_motOf(mot, diff)) {
+      case 'walker': return const Color(0xFF16A34A);
+      case 'cyclist': return const Color(0xFFD97706);
+      case 'rider': return const Color(0xFF2563EB);
       default: return Colors.grey;
     }
   }
@@ -108,9 +121,9 @@ class _AcceptOrderScreenState extends State<AcceptOrderScreen> {
                               borderRadius: BorderRadius.circular(8),
                             ),
                             child: Text(
-                              (session?.difficulty ?? '').toUpperCase(),
+                              _motLabel(session?.mot, session?.difficulty),
                               style: TextStyle(
-                                color: _diffColor(session?.difficulty),
+                                color: _motColor(session?.mot, session?.difficulty),
                                 fontWeight: FontWeight.bold,
                                 fontSize: 12,
                               ),
