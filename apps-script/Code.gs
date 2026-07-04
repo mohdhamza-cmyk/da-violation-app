@@ -827,6 +827,31 @@ function purgeCatchUp() {
   purgeOldFiles();
 }
 
+// ── ONE-TIME: INSTALL THE DAILY MAINTENANCE TRIGGER ───────────────────────
+// Run this ONCE from the editor. It guarantees a daily time-based trigger on
+// purgeOldFiles exists (which drives BOTH the 10-day file purge AND the weekly
+// roll). Idempotent: if a daily purgeOldFiles trigger already exists it does
+// nothing, so it is always safe to run. Use this instead of adding the trigger
+// by hand — it can't be misconfigured, and re-running it after the trigger was
+// disabled/removed simply recreates it.
+//
+// NOTE: a Purge Log row is written on EVERY purgeOldFiles run, so if that tab
+// stops updating it means the trigger stopped firing — run this again and check
+// the Executions panel for any failed runs.
+function ensureDailyMaintenanceTrigger() {
+  const existing = ScriptApp.getProjectTriggers().filter(function (t) {
+    return t.getHandlerFunction() === "purgeOldFiles" &&
+           t.getEventType() === ScriptApp.EventType.CLOCK;
+  });
+  if (existing.length > 0) {
+    Logger.log("Daily maintenance trigger already installed (" + existing.length + "). Nothing to do.");
+    return;
+  }
+  ScriptApp.newTrigger("purgeOldFiles").timeBased().atHour(3).everyDays(1).create();
+  Logger.log("Installed daily maintenance trigger: purgeOldFiles runs every day ~03:00 " +
+    "(drives the file purge AND the weekly roll).");
+}
+
 function testSheet() {
   const sheet = getCurrentSheet();
   sheet.appendRow(["TEST", new Date().toISOString(), "Connection OK"]);
