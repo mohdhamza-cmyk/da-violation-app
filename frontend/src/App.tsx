@@ -2223,7 +2223,11 @@ async function uploadSubmission(record: any, files: any[]): Promise<boolean> {
   for (let vtries = 0; vtries < 3 && !ok; vtries++) {
     await sleep(vtries === 0 ? 4000 : 3500 * (vtries + 1));
     try {
-      const c = await fetch(`${GOOGLE_SCRIPT_URL}?check=${record.id}`);
+      const c = await fetch(
+        `${GOOGLE_SCRIPT_URL}?check=${record.id}&country=${encodeURIComponent(
+          record.country || DEFAULT_COUNTRY
+        )}`
+      );
       const res = await c.json();
       ok = res.found === true;
     } catch {}
@@ -3868,12 +3872,11 @@ function DashboardView({
     };
   }, [pullDist]);
 
-  async function fetchSheet(isAutoRefresh = false) {
-    // Up to 3 attempts with backoff. Uses a 25s timeout so a slow/busy server
-    // doesn't hang the dashboard forever. If Apps Script is over its execution
-    // quota it returns an HTML "too many scripts running" page (not JSON) — we
-    // detect that and show a friendly "server busy" message while keeping any
-    // data already on screen, instead of blanking out.
+  // Fetch ONE country's Current tab (each country can live in its own
+  // spreadsheet). Returns the rows array, or "busy" (quota HTML) / "error".
+  async function fetchOneCountry(
+    ctry: string
+  ): Promise<any[] | "busy" | "error"> {
     const delays = [0, 4000, 8000];
     for (let attempt = 0; attempt < delays.length; attempt++) {
       if (delays[attempt])
@@ -3881,55 +3884,79 @@ function DashboardView({
       try {
         const ctrl = new AbortController();
         const timer = setTimeout(() => ctrl.abort(), 25000);
-        const res = await fetch(GOOGLE_SCRIPT_URL, { signal: ctrl.signal });
+        const res = await fetch(
+          `${GOOGLE_SCRIPT_URL}?country=${encodeURIComponent(ctry)}`,
+          { signal: ctrl.signal }
+        );
         clearTimeout(timer);
         const text = await res.text();
-        // Busy / quota page is HTML, not JSON
         if (/too many scripts|<html|<!DOCTYPE/i.test(text)) {
-          if (attempt < delays.length - 1) continue; // retry after backoff
-          setError(
-            "Server busy (Google quota). Showing last data — retrying shortly."
-          );
-          setLoading(false);
-          return;
+          if (attempt < delays.length - 1) continue;
+          return "busy";
         }
-        let raw: any;
         try {
-          raw = JSON.parse(text);
+          const raw = JSON.parse(text);
+          return Array.isArray(raw) ? raw : [];
         } catch {
           if (attempt < delays.length - 1) continue;
-          setError(
-            "Couldn't read server response. Showing last data — will retry."
-          );
-          setLoading(false);
-          return;
+          return "error";
         }
-        const clean = Array.isArray(raw)
-          ? raw.filter(
-              (r: any) => r.Store && r.Store !== "TEST" && r.Store !== ""
-            )
-          : [];
-        setSheetData(clean);
-        setLastRefresh(
-          new Date().toLocaleTimeString("en-AE", {
-            hour: "2-digit",
-            minute: "2-digit",
-          })
-        );
-        setLoading(false);
-        setError("");
-        return; // success
-      } catch (e: any) {
-        if (attempt < delays.length - 1) continue; // timeout/network — retry
-        // Final failure: keep any existing data on screen, just flag it
-        setError(
-          isAutoRefresh
-            ? "Couldn't refresh (server busy). Showing last data."
-            : "Server busy or unreachable. Pull down to retry."
-        );
-        setLoading(false);
+      } catch {
+        if (attempt < delays.length - 1) continue;
+        return "error";
       }
     }
+    return "error";
+  }
+
+  async function fetchSheet(isAutoRefresh = false) {
+    // Fan out across only the countries this user is scoped to, then merge.
+    // A single-country user makes one call (as before); a multi-country user
+    // reads each country's sheet in parallel.
+    const scopedCountries = Array.from(
+      new Set(getScopedStores(user).map(storeCountry))
+    );
+    const countriesToFetch = scopedCountries.length
+      ? scopedCountries
+      : userCountries(user);
+
+    const results = await Promise.all(countriesToFetch.map(fetchOneCountry));
+    const merged: any[] = [];
+    let anyOk = false;
+    let anyBusy = false;
+    results.forEach((r) => {
+      if (Array.isArray(r)) {
+        anyOk = true;
+        for (const row of r) merged.push(row);
+      } else if (r === "busy") anyBusy = true;
+    });
+
+    if (!anyOk) {
+      // Nothing came back — keep whatever's on screen, flag why.
+      setError(
+        anyBusy
+          ? "Server busy (Google quota). Showing last data — retrying shortly."
+          : isAutoRefresh
+          ? "Couldn't refresh (server busy). Showing last data."
+          : "Server busy or unreachable. Pull down to retry."
+      );
+      setLoading(false);
+      return;
+    }
+
+    const clean = merged.filter(
+      (r: any) => r.Store && r.Store !== "TEST" && r.Store !== ""
+    );
+    setSheetData(clean);
+    setLastRefresh(
+      new Date().toLocaleTimeString("en-AE", {
+        hour: "2-digit",
+        minute: "2-digit",
+      })
+    );
+    // Partial success (some countries busy) — show data but note it.
+    setError(anyBusy ? "Some countries still loading (server busy)…" : "");
+    setLoading(false);
   }
 
   // ── CSV / EXCEL EXPORT ──────────────────────────────────────────────────
