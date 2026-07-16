@@ -81,6 +81,46 @@ scoped follow-up if you want it.
 | 9 | Adherence for an Egypt store | Denominator uses Egypt local elapsed slots |
 | 10 | Old backend / offline login | Built-in UAE accounts still log in |
 
+## Per-country storage (separate spreadsheet + Drive per country)
+
+Each country's **submission data** (spreadsheet) and **files** (Drive root) can
+live in their own place. The store-list sheet and Users tab stay **central**.
+
+**How a country's location is resolved** (`configForCountry`):
+1. An explicit entry in `COUNTRY_CONFIG` in `Code.gs` (paste IDs to pin exactly
+   where a country lives / who owns it), else
+2. IDs remembered in **Script Properties** from a previous auto-create, else
+3. **Auto-created on first use** — a new `DarkStore Data — <country>` spreadsheet
+   and `DarkStore Files — <country>` Drive folder, whose IDs are saved to Script
+   Properties and reused forever.
+
+**UAE keeps the original `SHEET_ID` / `ROOT_FOLDER_ID`**, so all existing UAE
+data, weekly tabs, and files stay exactly where they are — zero migration.
+
+**Drive layout** inside each country root is `Store / Date / Hour` (so UAE's
+existing file paths are unchanged).
+
+**Maintenance** (`purgeOldFiles`, run by the daily trigger) now loops every known
+country: for each it rolls `Current` → weekly tabs, purges that country's own
+Drive root, and writes to that country's own `Purge Log`. It shares one time
+budget and resumes via the existing ~2-minute catch-up trigger.
+
+**Dashboard** fans out one fetch per country the user is scoped to (via
+`?country=<C>`) and merges — a single-country user still makes one call.
+
+**To pin a country manually** instead of auto-create, add to `COUNTRY_CONFIG`:
+```js
+const COUNTRY_CONFIG = {
+  UAE:   { sheetId: SHEET_ID, rootFolderId: ROOT_FOLDER_ID },
+  KSA:   { sheetId: "…", rootFolderId: "…" },
+};
+```
+
+**Note:** auto-created spreadsheets/folders are owned by the script's executing
+account; share them with each country's team as needed. The Apps Script
+30-execution ceiling is per *script project*, so separate spreadsheets reduce
+per-document write contention but do **not** raise that ceiling.
+
 ## Known limitation
 
 POC (CM/Supervisor/TL) name matching is still by name within the country gate.
