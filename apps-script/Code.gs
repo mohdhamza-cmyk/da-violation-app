@@ -3,8 +3,30 @@ const SHEET_ID = "1sqj5OIJP1whQ20YVWXZqONtOKexaGI6yOxKthSC4ymk";
 const ROOT_FOLDER_ID = "1q8BB_ZCUbTcoHCaK-O36_N50AH3jsPfE";
 
 // Live store list + POC mapping source (separate spreadsheet, Sheet1).
-// Columns: Store | TL | Supervisor | AM | City Manager
+// Columns: Country | Store | TL | Supervisor | AM | City Manager
 const STORE_LIST_SHEET_ID = "192-ZhllfZyNJHMUqjbjseKxGcM0Eb14hKvuSO7dfunk";
+
+// Central user-account tab (in the store-list spreadsheet). Tab name "Users",
+// columns: Username | Password | Role | Name | ScopeType | ScopeValue | Countries
+// Countries is a comma-separated list ("UAE,KSA") or "ALL".
+const USERS_TAB_NAME = "Users";
+
+// ── COUNTRIES ─────────────────────────────────────────────────────────────
+// Supported countries. UAE is the default for any legacy row/folder/account
+// that predates multi-country support, so everything stays backward compatible.
+const DEFAULT_COUNTRY = "UAE";
+const COUNTRIES = ["UAE", "KSA", "Egypt", "Bahrain", "Qatar", "Kuwait"];
+const COUNTRY_SET = COUNTRIES.reduce(function (m, c) { m[c] = true; return m; }, {});
+
+// Normalize an incoming country value to a supported one; default to UAE.
+function normCountry(v) {
+  const s = String(v || "").trim();
+  if (!s) return DEFAULT_COUNTRY;
+  for (let i = 0; i < COUNTRIES.length; i++) {
+    if (COUNTRIES[i].toLowerCase() === s.toLowerCase()) return COUNTRIES[i];
+  }
+  return s; // unknown but non-empty — keep as-is so nothing is silently dropped
+}
 
 // Get-or-create a child folder. FAST PATH is lock-free (folder already exists),
 // which is the case for all but the very first request of each hour. We only
@@ -27,9 +49,13 @@ function getOrCreateFolder(parent, name) {
   }
 }
 
-function getHourFolder(store, date, hourSlot) {
+// Drive layout is now Country / Store / Date / Hour. New uploads (including UAE)
+// nest under a country folder. Legacy UAE data already at ROOT/Store/... is left
+// in place and still handled by purgeOldFiles (which understands both layouts).
+function getHourFolder(country, store, date, hourSlot) {
   const root = DriveApp.getFolderById(ROOT_FOLDER_ID);
-  const storeFolder = getOrCreateFolder(root, store);
+  const countryFolder = getOrCreateFolder(root, normCountry(country));
+  const storeFolder = getOrCreateFolder(countryFolder, store);
   const dateFolder = getOrCreateFolder(storeFolder, date);
   const hourLabel = String(hourSlot).replace(":", "-");
   return getOrCreateFolder(dateFolder, hourLabel);
@@ -61,6 +87,13 @@ function ensureWeekHeader(sheet) {
   if (String(cell.getValue()).trim() !== "Week") cell.setValue("Week");
 }
 
+// Make sure the "Country" header exists in column 17, once. Country was added
+// after launch, so legacy rows simply have a blank column 17 (read as UAE).
+function ensureCountryHeader(sheet) {
+  const cell = sheet.getRange(1, 17);
+  if (String(cell.getValue()).trim() !== "Country") cell.setValue("Country");
+}
+
 // ── ROLLING CURRENT + IMMUTABLE WEEKLY TABS ───────────────────────────────
 // The app reads and writes only the "Current" tab, which is kept small (the
 // last CURRENT_DAYS). A daily job MOVES rows older than CURRENT_DAYS out of
@@ -71,7 +104,7 @@ function ensureWeekHeader(sheet) {
 const CURRENT_DAYS = 10;
 const SHEET_HEADERS = [
   "ID","Timestamp","Date","HourSlot","Store","TL","Supervisor","AM","CityManager",
-  "Inside_Count","Outside_Count","Parking_Count","TotalFiles","DriveLink","FileLinks","Week"
+  "Inside_Count","Outside_Count","Parking_Count","TotalFiles","DriveLink","FileLinks","Week","Country"
 ];
 
 // True for a weekly-archive tab name like "2026-W07".
@@ -410,7 +443,7 @@ function doPost(e) {
     // recordId+index prefix already exists, it is skipped. This makes retries
     // safe and means no single request is ever large enough to time out.
     if (data.action === "addFile") {
-      const hourFolder = getHourFolder(data.store, data.date, data.hourSlot);
+      const hourFolder = getHourFolder(data.country, data.store, data.date, data.hourSlot);
       const prefix = data.recordId + "__" + data.index + "__";
       const safeName = prefix + (data.fileName || "file");
       // Idempotent retry: skip if this exact file already exists. Look it up by
@@ -431,7 +464,7 @@ function doPost(e) {
     // Idempotent: a chunk that already exists is skipped. Keeps every request
     // tiny so uploads never fail on large files.
     if (data.action === "addChunk") {
-      const hourFolder = getHourFolder(data.store, data.date, data.hourSlot);
+      const hourFolder = getHourFolder(data.country, data.store, data.date, data.hourSlot);
       const tmp = getTmpFolder(hourFolder);
       const chunkName = data.recordId + "__f" + data.fileIndex + "__c" + data.chunkIndex;
       const existing = tmp.getFilesByName(chunkName);
@@ -447,7 +480,7 @@ function doPost(e) {
     // the temp chunks. Idempotent: if the real file already exists, it returns
     // success. If a chunk is missing, returns success:false so the app resends.
     if (data.action === "assembleFile") {
-      const hourFolder = getHourFolder(data.store, data.date, data.hourSlot);
+      const hourFolder = getHourFolder(data.country, data.store, data.date, data.hourSlot);
       const realPrefix = data.recordId + "__" + data.fileIndex + "__";
       // Already assembled?
       const check = hourFolder.getFiles();
@@ -508,7 +541,7 @@ function doPost(e) {
           }
         }
       }
-      const hourFolder = getHourFolder(data.store, data.date, data.hourSlot);
+      const hourFolder = getHourFolder(data.country, data.store, data.date, data.hourSlot);
       // Collect this record's file links
       const links = [];
       const recPrefix = data.id + "__";
@@ -519,6 +552,7 @@ function doPost(e) {
       }
       const sections = typeof data.sections === "string" ? JSON.parse(data.sections) : (data.sections || {});
       ensureWeekHeader(sheet);
+      ensureCountryHeader(sheet);
       sheet.appendRow([
         data.id, data.timestamp, data.date, data.hourSlot, data.store,
         data.tl, data.supervisor, data.am, data.cityManager,
@@ -528,14 +562,15 @@ function doPost(e) {
         data.totalFiles,
         hourFolder.getUrl(),
         links.join(", "),
-        isoWeek(data.date || data.timestamp)
+        isoWeek(data.date || data.timestamp),
+        normCountry(data.country)
       ]);
       return ContentService.createTextOutput(JSON.stringify({ success: true })).setMimeType(ContentService.MimeType.JSON);
     }
 
     // ── LEGACY: single-payload submission (kept as fallback) ─────────────
     const sheet = getCurrentSheet();
-    const hourFolder = getHourFolder(data.store, data.date, data.hourSlot);
+    const hourFolder = getHourFolder(data.country, data.store, data.date, data.hourSlot);
     const driveLinks = [];
     const files = typeof data.files === "string" ? JSON.parse(data.files) : (data.files || []);
     files.forEach(f => {
@@ -548,12 +583,13 @@ function doPost(e) {
     });
     const sections = typeof data.sections === "string" ? JSON.parse(data.sections) : (data.sections || {});
     ensureWeekHeader(sheet);
+    ensureCountryHeader(sheet);
     sheet.appendRow([
       data.id, data.timestamp, data.date, data.hourSlot, data.store,
       data.tl, data.supervisor, data.am, data.cityManager,
       (sections.inside || []).length, (sections.outside || []).length, (sections.parking || []).length,
       data.totalFiles, hourFolder.getUrl(), driveLinks.join(", "),
-      isoWeek(data.date || data.timestamp)
+      isoWeek(data.date || data.timestamp), normCountry(data.country)
     ]);
     return ContentService.createTextOutput(JSON.stringify({ success: true })).setMimeType(ContentService.MimeType.JSON);
 
@@ -567,14 +603,14 @@ function doPost(e) {
 // store-list sheet. Cached 10 min in CacheService to keep responses fast.
 function getStoreMappingJSON() {
   const cache = CacheService.getScriptCache();
-  const cached = cache.get("store_mapping_v1");
+  const cached = cache.get("store_mapping_v2");
   if (cached) return cached;
 
   const ss = SpreadsheetApp.openById(STORE_LIST_SHEET_ID);
   // Use Sheet1 explicitly; fall back to the first sheet if not found
   const sheet = ss.getSheetByName("Sheet1") || ss.getSheets()[0];
   const data = sheet.getDataRange().getValues();
-  if (data.length < 2) return JSON.stringify({ mapping: {}, order: [] });
+  if (data.length < 2) return JSON.stringify({ mapping: {}, order: [], stores: [] });
 
   // Locate columns by header so the layout can shift without breaking
   const headers = data[0].map(h => String(h).trim().toLowerCase());
@@ -582,37 +618,106 @@ function getStoreMappingJSON() {
     for (const n of names) { const i = headers.indexOf(n); if (i !== -1) return i; }
     return -1;
   };
+  const cCountry = col(["country", "countries", "market", "geo"]);
   const cStore = col(["store", "stores", "store name", "dark store", "darkstore", "location", "site"]);
   const cTL    = col(["tl", "tls", "team leader", "teamleader", "team lead"]);
   const cSup   = col(["supervisor", "supervisors", "sup"]);
   const cAM    = col(["am", "ams", "assistant manager", "asst manager", "asst. manager", "area manager"]);
   const cCM    = col(["city manager", "citymanager", "city managers", "manager", "cm"]);
 
+  // stores[] is the collision-safe source of truth: each store carries its own
+  // country, so the same store name can exist in two countries without merging.
+  // mapping/order are kept for backward compatibility (keyed by store name;
+  // last row wins on a name collision — new clients should use stores[]).
+  const stores = [];
   const mapping = {};
   const order = [];
   for (let i = 1; i < data.length; i++) {
     const row = data[i];
     const store = cStore === -1 ? "" : String(row[cStore]).trim();
     if (!store) continue; // skip blank rows
-    mapping[store] = {
+    const rec = {
+      country:     cCountry === -1 ? DEFAULT_COUNTRY : normCountry(row[cCountry]),
+      store:       store,
       tl:          cTL  === -1 ? "" : String(row[cTL]).trim(),
       supervisor:  cSup === -1 ? "" : String(row[cSup]).trim(),
       am:          cAM  === -1 ? "" : String(row[cAM]).trim(),
       cityManager: cCM  === -1 ? "" : String(row[cCM]).trim(),
     };
+    stores.push(rec);
+    mapping[store] = { tl: rec.tl, supervisor: rec.supervisor, am: rec.am, cityManager: rec.cityManager };
     order.push(store);
   }
 
-  const json = JSON.stringify({ mapping: mapping, order: order, count: order.length });
+  const json = JSON.stringify({ mapping: mapping, order: order, stores: stores, count: stores.length });
   // Only cache a GOOD result — never poison the cache with an empty/failed read
-  if (order.length > 0) cache.put("store_mapping_v1", json, 600);
+  if (stores.length > 0) cache.put("store_mapping_v2", json, 600);
   return json;
 }
 
-// Run from the editor to clear the 10-min store cache immediately (e.g. right
-// after you add stores to the sheet and want them live now instead of waiting).
+// Run from the editor to clear the store cache immediately (e.g. right after you
+// add stores to the sheet and want them live now instead of waiting 10 min).
 function clearStoreCache() {
+  CacheService.getScriptCache().remove("store_mapping_v2");
   CacheService.getScriptCache().remove("store_mapping_v1");
+}
+
+// Validate a login against the central Users tab. Returns the matched account's
+// scope only (never the password or other accounts). Returns {ok:false} on any
+// miss or if the Users tab doesn't exist yet — the app then falls back to its
+// built-in accounts, so existing UAE logins keep working during rollout.
+function loginUser_(username, password) {
+  const u = String(username || "").trim().toLowerCase();
+  const p = String(password || "");
+  if (!u) return { ok: false };
+  let sheet;
+  try {
+    const ss = SpreadsheetApp.openById(STORE_LIST_SHEET_ID);
+    sheet = ss.getSheetByName(USERS_TAB_NAME);
+  } catch (e) { return { ok: false, reason: "users-unavailable" }; }
+  if (!sheet) return { ok: false, reason: "no-users-tab" };
+
+  const data = sheet.getDataRange().getValues();
+  if (data.length < 2) return { ok: false, reason: "no-users" };
+  const headers = data[0].map(function (h) { return String(h).trim().toLowerCase(); });
+  const col = function (names) {
+    for (let i = 0; i < names.length; i++) { const j = headers.indexOf(names[i]); if (j !== -1) return j; }
+    return -1;
+  };
+  const cUser  = col(["username", "user", "login"]);
+  const cPass  = col(["password", "pass", "pwd"]);
+  const cRole  = col(["role"]);
+  const cName  = col(["name", "display name", "fullname"]);
+  const cSType = col(["scopetype", "scope type", "scope"]);
+  const cSVal  = col(["scopevalue", "scope value", "scopename"]);
+  const cCtry  = col(["countries", "country"]);
+  if (cUser === -1 || cPass === -1) return { ok: false, reason: "bad-users-schema" };
+
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    if (String(row[cUser]).trim().toLowerCase() !== u) continue;
+    if (String(row[cPass]) !== p) return { ok: false }; // wrong password
+    // Parse countries: "ALL" (or blank) => every supported country.
+    let countries;
+    const raw = cCtry === -1 ? "" : String(row[cCtry]).trim();
+    if (!raw || raw.toUpperCase() === "ALL") {
+      countries = COUNTRIES.slice();
+    } else {
+      countries = raw.split(",").map(function (x) { return normCountry(x); }).filter(function (x) { return x; });
+    }
+    return {
+      ok: true,
+      user: {
+        username:  String(row[cUser]).trim(),
+        name:      cName  === -1 ? String(row[cUser]).trim() : String(row[cName]).trim(),
+        role:      cRole  === -1 ? "L1" : String(row[cRole]).trim(),
+        scopeType: cSType === -1 ? "all" : String(row[cSType]).trim(),
+        scopeValue:cSVal  === -1 ? "" : String(row[cSVal]).trim(),
+        countries: countries
+      }
+    };
+  }
+  return { ok: false }; // no such username
 }
 
 function doGet(e) {
@@ -626,6 +731,15 @@ function doGet(e) {
       .setMimeType(ContentService.MimeType.JSON);
   }
 
+  // ── LOGIN: ?login=1&u=<username>&p=<password> ────────────────────────────
+  // Validates credentials against the central "Users" tab and returns ONLY the
+  // matched account's scope — never the password, never the list of other users.
+  // This is deliberately server-side so a public URL can't dump all credentials.
+  if (e && e.parameter && e.parameter.login !== undefined) {
+    return ContentService.createTextOutput(JSON.stringify(loginUser_(e.parameter.u, e.parameter.p)))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+
   // Reads/verifies come from the small, fast "Current" tab (last ~15 days).
   const sheet = getCurrentSheet();
 
@@ -635,7 +749,7 @@ function doGet(e) {
   if (e && e.parameter && e.parameter.fileCount) {
     const recId = String(e.parameter.fileCount);
     try {
-      const hourFolder = getHourFolder(e.parameter.store, e.parameter.date, e.parameter.slot);
+      const hourFolder = getHourFolder(e.parameter.country, e.parameter.store, e.parameter.date, e.parameter.slot);
       const prefix = recId + "__";
       // Also return WHICH file indices are present (parsed from names shaped
       // "<recordId>__<index>__..."), so the app can resend only the missing
@@ -730,24 +844,20 @@ function purgeOldFiles() {
 
   let totalDeleted = 0, totalFreedMB = 0, stoppedEarly = false;
 
-  const storeFolders = rootFolder.getFolders();
-  outer:
-  while (storeFolders.hasNext()) {
-    const storeFolder = storeFolders.next();
+  // Purge past-retention files under ONE store folder (Store/Date/Hour/files).
+  // Returns true if it hit the time budget and the caller should stop.
+  function purgeStoreFolder(storeFolder) {
     const dateFolders = storeFolder.getFolders();
     while (dateFolders.hasNext()) {
-      if (Date.now() - startTime > MAX_MS) { stoppedEarly = true; break outer; }
+      if (Date.now() - startTime > MAX_MS) return true;
       const dateFolder = dateFolders.next();
       const d = folderDate(dateFolder);
       if (d >= cutoff) continue; // still within retention window — keep
 
-      // FILES LIVE INSIDE HOUR SUBFOLDERS: Store -> Date -> HourSlot -> files
-      // (The old code looked in the Date folder directly and found nothing,
-      //  which is why every purge logged "Nothing to delete".)
+      // FILES LIVE INSIDE HOUR SUBFOLDERS: Store -> Date -> HourSlot -> files.
       const hourFolders = dateFolder.getFolders();
       while (hourFolders.hasNext()) {
         const hourFolder = hourFolders.next();
-        // 1) delete the real files in the hour folder
         const files = hourFolder.getFiles();
         while (files.hasNext()) {
           const f = files.next();
@@ -755,7 +865,7 @@ function purgeOldFiles() {
           f.setTrashed(true);
           totalDeleted++;
         }
-        // 2) clean any leftover _tmp chunk folders (abandoned chunked uploads)
+        // clean any leftover _tmp chunk folders (abandoned chunked uploads)
         const subs = hourFolder.getFolders();
         while (subs.hasNext()) {
           const sub = subs.next();
@@ -768,8 +878,26 @@ function purgeOldFiles() {
           }
         }
       }
-      // NOTE: we NEVER delete folders — they stay as a permanent audit trail
-      // of when each store submitted. Only the files inside are purged.
+      // NOTE: we NEVER delete folders — they stay as a permanent audit trail.
+    }
+    return false;
+  }
+
+  // Root children are EITHER country folders (new layout Country/Store/Date/Hour)
+  // OR legacy store folders (old UAE layout Store/Date/Hour). Handle both so no
+  // data — old or new — is ever missed.
+  const rootChildren = rootFolder.getFolders();
+  outer:
+  while (rootChildren.hasNext()) {
+    if (Date.now() - startTime > MAX_MS) { stoppedEarly = true; break; }
+    const child = rootChildren.next();
+    if (COUNTRY_SET[child.getName()]) {
+      const storeFolders = child.getFolders(); // country → stores
+      while (storeFolders.hasNext()) {
+        if (purgeStoreFolder(storeFolders.next())) { stoppedEarly = true; break outer; }
+      }
+    } else {
+      if (purgeStoreFolder(child)) { stoppedEarly = true; break outer; } // legacy store
     }
   }
 
