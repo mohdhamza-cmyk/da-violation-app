@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { supabase, ActiveOrder, SessionStatus, MOT_LABEL, MOT_STYLE } from '@/lib/supabase'
 import { formatDistanceToNow } from 'date-fns'
 import { Activity, CheckCircle, Clock, Users } from 'lucide-react'
+import toast from 'react-hot-toast'
 
 const STATUS_COLORS: Record<SessionStatus, string> = {
   waiting: 'bg-gray-100 text-gray-700',
@@ -43,6 +44,7 @@ export default function LiveDashboard() {
   const [stats, setStats] = useState({ active: 0, completed: 0, riders: 0, avgScore: 0 })
   const [loading, setLoading] = useState(true)
   const [now, setNow] = useState(Date.now())
+  const [discarding, setDiscarding] = useState<string | null>(null)
 
   const loadData = useCallback(async () => {
     const [ordersRes, statsRes] = await Promise.all([
@@ -62,6 +64,21 @@ export default function LiveDashboard() {
     }
     setLoading(false)
   }, [])
+
+  // Force-close a stuck/unwanted session. Marks it Failed in the backend so it
+  // drops off the live board immediately. Allowed for any staff role via RLS.
+  async function discardOrder(order: ActiveOrder) {
+    if (!window.confirm(`Discard order ${order.order_code} (${order.rider_name})?\n\nThis force-closes the session as Failed and cannot be undone.`)) return
+    setDiscarding(order.id)
+    const { error } = await supabase
+      .from('training_sessions')
+      .update({ status: 'failed', trainer_notes: 'Force-closed from dashboard' })
+      .eq('id', order.id)
+    setDiscarding(null)
+    if (error) { toast.error(error.message); return }
+    toast.success(`Order ${order.order_code} discarded`)
+    loadData()
+  }
 
   useEffect(() => {
     loadData()
@@ -128,7 +145,7 @@ export default function LiveDashboard() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="bg-gray-50 text-left">
-                  {['Order', 'Rider', 'MOT', 'Store', 'Location', 'Status', 'Elapsed', 'Assigned'].map(h => (
+                  {['Order', 'Rider', 'MOT', 'Store', 'Location', 'Status', 'Elapsed', 'Assigned', 'Actions'].map(h => (
                     <th key={h} className="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">{h}</th>
                   ))}
                 </tr>
@@ -167,6 +184,14 @@ export default function LiveDashboard() {
                       </td>
                       <td className="px-4 py-3 text-gray-400 text-xs">
                         {formatDistanceToNow(new Date(order.assigned_at), { addSuffix: true })}
+                      </td>
+                      <td className="px-4 py-3">
+                        <button
+                          onClick={() => discardOrder(order)}
+                          disabled={discarding === order.id}
+                          className="text-xs font-medium text-red-600 hover:text-red-700 hover:underline whitespace-nowrap disabled:opacity-50">
+                          {discarding === order.id ? 'Closing…' : 'Discard'}
+                        </button>
                       </td>
                     </tr>
                   )
