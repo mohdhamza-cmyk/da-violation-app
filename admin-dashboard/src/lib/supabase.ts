@@ -17,6 +17,26 @@ export type UserRole = 'rider' | 'associate' | 'admin'
 // Roles allowed to access the admin dashboard (everyone except riders).
 export const STAFF_ROLES = ['admin', 'associate', 'trainer', 'supervisor', 'area_manager', 'city_manager']
 
+// Create a user (rider or staff) via the admin Edge Function — auto-confirmed,
+// no confirmation email, and it does not disturb the admin's own session.
+export async function createUserAdmin(payload: {
+  email: string; password: string; full_name?: string; employee_id?: string
+  phone?: string; role?: string; mot?: string
+}): Promise<{ error?: string }> {
+  const { data, error } = await supabase.functions.invoke('admin-create-user', { body: payload })
+  if (data?.error) return { error: data.error }
+  if (error) {
+    // FunctionsHttpError carries the response body (e.g. 403 admin check)
+    try {
+      const ctx = (error as unknown as { context?: Response }).context
+      const body = ctx ? await ctx.json() : null
+      if (body?.error) return { error: body.error }
+    } catch { /* ignore */ }
+    return { error: error.message }
+  }
+  return {}
+}
+
 export type SessionStatus =
   | 'waiting' | 'assigned' | 'accepted' | 'pickup_done'
   | 'in_transit' | 'arrived' | 'delivered' | 'returning' | 'completed' | 'failed'

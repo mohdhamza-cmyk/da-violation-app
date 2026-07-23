@@ -1,7 +1,7 @@
 'use client'
 export const dynamic = 'force-dynamic'
 import { useEffect, useState, useCallback } from 'react'
-import { supabase, Profile, Store, RiderPerformance, Mot, MOT_VALUES, MOT_LABEL, MOT_STYLE } from '@/lib/supabase'
+import { supabase, createUserAdmin, Profile, Store, RiderPerformance, Mot, MOT_VALUES, MOT_LABEL, MOT_STYLE } from '@/lib/supabase'
 import { Users, Search, Plus, ChevronRight } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { formatDistanceToNow } from 'date-fns'
@@ -64,13 +64,11 @@ export default function RidersPage() {
   }
 
   async function handleCreateRider() {
-    const { data, error } = await supabase.auth.signUp({
-      email: newRider.email,
-      password: newRider.password,
-      options: { data: { full_name: newRider.full_name, employee_id: newRider.employee_id, role: 'rider', mot: newRider.mot } }
+    const { error } = await createUserAdmin({
+      email: newRider.email, password: newRider.password, full_name: newRider.full_name,
+      employee_id: newRider.employee_id, phone: newRider.phone, role: 'rider', mot: newRider.mot,
     })
-    if (error || !data.user) { toast.error(error?.message ?? 'Failed'); return }
-    if (newRider.phone) await supabase.from('profiles').update({ phone: newRider.phone }).eq('id', data.user.id)
+    if (error) { toast.error(error); return }
     toast.success('Rider created')
     setShowCreate(false)
     setNewRider({ full_name: '', employee_id: '', phone: '', email: '', password: '', mot: 'rider' })
@@ -85,13 +83,11 @@ export default function RidersPage() {
         errors.push(`Row missing required fields: ${row.email || '(no email)'}`)
         continue
       }
-      const { data, error } = await supabase.auth.signUp({
-        email: row.email.trim(),
-        password: row.password.trim(),
-        options: { data: { full_name: row.full_name, employee_id: row.employee_id, role: 'rider', mot: parseMot(row.mot) } }
+      const { error } = await createUserAdmin({
+        email: row.email.trim(), password: row.password.trim(), full_name: row.full_name,
+        employee_id: row.employee_id, phone: row.phone, role: 'rider', mot: parseMot(row.mot),
       })
-      if (error || !data.user) { errors.push(`${row.email}: ${error?.message ?? 'Failed'}`); continue }
-      if (row.phone) await supabase.from('profiles').update({ phone: row.phone }).eq('id', data.user.id)
+      if (error) { errors.push(`${row.email}: ${error}`); continue }
       success++
     }
     loadData()

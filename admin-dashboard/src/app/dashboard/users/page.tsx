@@ -1,7 +1,7 @@
 'use client'
 export const dynamic = 'force-dynamic'
 import { useEffect, useState, useCallback } from 'react'
-import { supabase, Profile } from '@/lib/supabase'
+import { supabase, createUserAdmin, Profile } from '@/lib/supabase'
 import { Users, Plus, Shield } from 'lucide-react'
 import toast from 'react-hot-toast'
 import BulkUpload from '@/components/BulkUpload'
@@ -43,16 +43,14 @@ export default function UsersPage() {
   useEffect(() => { loadUsers() }, [loadUsers])
 
   async function handleCreate() {
-    const { data, error } = await supabase.auth.signUp({
-      email: form.email,
-      password: form.password,
-      options: { data: { full_name: form.full_name, employee_id: form.employee_id, role: form.role } },
+    const { error } = await createUserAdmin({
+      email: form.email, password: form.password, full_name: form.full_name,
+      employee_id: form.employee_id, phone: form.phone, role: form.role,
     })
-    if (error || !data.user) { toast.error(error?.message ?? 'Failed'); return }
-    if (form.phone) await supabase.from('profiles').update({ phone: form.phone }).eq('id', data.user.id)
-    await supabase.from('profiles').update({ role: form.role }).eq('id', data.user.id)
+    if (error) { toast.error(error); return }
     toast.success('User created')
     setShowCreate(false)
+    setForm({ full_name: '', employee_id: '', email: '', password: '', role: 'associate', phone: '' })
     loadUsers()
   }
 
@@ -72,13 +70,11 @@ export default function UsersPage() {
         continue
       }
       const role = row.role && STAFF_ROLE_VALUES.includes(row.role) ? row.role : 'associate'
-      const { data, error } = await supabase.auth.signUp({
-        email: row.email.trim(),
-        password: row.password.trim(),
-        options: { data: { full_name: row.full_name, employee_id: row.employee_id, role } },
+      const { error } = await createUserAdmin({
+        email: row.email.trim(), password: row.password.trim(), full_name: row.full_name,
+        employee_id: row.employee_id, phone: row.phone, role,
       })
-      if (error || !data.user) { errors.push(`${row.email}: ${error?.message ?? 'Failed'}`); continue }
-      await supabase.from('profiles').update({ role, phone: row.phone || null }).eq('id', data.user.id)
+      if (error) { errors.push(`${row.email}: ${error}`); continue }
       success++
     }
     loadUsers()
