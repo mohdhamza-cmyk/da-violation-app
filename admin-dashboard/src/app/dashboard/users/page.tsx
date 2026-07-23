@@ -1,7 +1,7 @@
 'use client'
 export const dynamic = 'force-dynamic'
 import { useEffect, useState, useCallback } from 'react'
-import { supabase, createUserAdmin, Profile } from '@/lib/supabase'
+import { supabase, createUserAdmin, updateUserAdmin, Profile } from '@/lib/supabase'
 import { Users, Plus, Shield } from 'lucide-react'
 import toast from 'react-hot-toast'
 import BulkUpload from '@/components/BulkUpload'
@@ -32,6 +32,9 @@ export default function UsersPage() {
   const [loading, setLoading] = useState(true)
   const [showCreate, setShowCreate] = useState(false)
   const [form, setForm] = useState({ full_name: '', employee_id: '', email: '', password: '', role: 'associate', phone: '' })
+  const [resetUser, setResetUser] = useState<Profile | null>(null)
+  const [newPassword, setNewPassword] = useState('')
+  const [resetting, setResetting] = useState(false)
 
   const loadUsers = useCallback(async () => {
     const { data } = await supabase.from('profiles').select('*')
@@ -52,6 +55,16 @@ export default function UsersPage() {
     setShowCreate(false)
     setForm({ full_name: '', employee_id: '', email: '', password: '', role: 'associate', phone: '' })
     loadUsers()
+  }
+
+  async function handleResetPassword() {
+    if (!resetUser) return
+    setResetting(true)
+    const { error } = await updateUserAdmin({ user_id: resetUser.id, password: newPassword })
+    setResetting(false)
+    if (error) { toast.error(error); return }
+    toast.success(`Password reset for ${resetUser.full_name}`)
+    setResetUser(null); setNewPassword('')
   }
 
   async function toggleActive(user: Profile) {
@@ -151,9 +164,14 @@ export default function UsersPage() {
                       </span>
                     </td>
                     <td className="px-4 py-3">
-                      <button onClick={() => toggleActive(user)} className="text-xs text-blue-600 hover:underline whitespace-nowrap">
-                        {user.is_active ? 'Deactivate' : 'Activate'}
-                      </button>
+                      <div className="flex items-center gap-3 whitespace-nowrap">
+                        <button onClick={() => { setResetUser(user); setNewPassword('') }} className="text-xs text-blue-600 hover:underline">
+                          Reset password
+                        </button>
+                        <button onClick={() => toggleActive(user)} className="text-xs text-gray-500 hover:underline">
+                          {user.is_active ? 'Deactivate' : 'Activate'}
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -162,6 +180,30 @@ export default function UsersPage() {
           </div>
         )}
       </div>
+
+      {/* Reset Password Modal */}
+      {resetUser && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-xl p-6 w-full max-w-sm space-y-4">
+            <div>
+              <h2 className="font-semibold text-gray-900">Reset Password</h2>
+              <p className="text-sm text-gray-500 mt-0.5">{resetUser.full_name} · {resetUser.employee_id}</p>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">New password</label>
+              <input type="text" value={newPassword} onChange={e => setNewPassword(e.target.value)}
+                className="input-field" placeholder="At least 6 characters" autoFocus />
+              <p className="text-xs text-gray-400 mt-1">Share the new password with the user directly.</p>
+            </div>
+            <div className="flex gap-3">
+              <button onClick={handleResetPassword} disabled={resetting || newPassword.length < 6} className="btn-primary flex-1">
+                {resetting ? 'Saving…' : 'Set Password'}
+              </button>
+              <button onClick={() => { setResetUser(null); setNewPassword('') }} className="btn-secondary flex-1">Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showCreate && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">

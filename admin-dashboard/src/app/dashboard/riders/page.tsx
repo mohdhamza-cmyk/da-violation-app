@@ -1,7 +1,7 @@
 'use client'
 export const dynamic = 'force-dynamic'
 import { useEffect, useState, useCallback } from 'react'
-import { supabase, createUserAdmin, Profile, Store, RiderPerformance, Mot, MOT_VALUES, MOT_LABEL, MOT_STYLE } from '@/lib/supabase'
+import { supabase, createUserAdmin, updateUserAdmin, Profile, Store, RiderPerformance, Mot, MOT_VALUES, MOT_LABEL, MOT_STYLE } from '@/lib/supabase'
 import { Users, Search, Plus, ChevronRight } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { formatDistanceToNow } from 'date-fns'
@@ -18,6 +18,7 @@ export default function RidersPage() {
   const [editing, setEditing] = useState<RiderPerformance | null>(null)
   const [editStore, setEditStore] = useState('')
   const [editMot, setEditMot] = useState<Mot>('rider')
+  const [editPassword, setEditPassword] = useState('')
   const [showCreate, setShowCreate] = useState(false)
   const [newRider, setNewRider] = useState({ full_name: '', employee_id: '', phone: '', email: '', password: '', mot: 'rider' as Mot })
 
@@ -45,7 +46,7 @@ export default function RidersPage() {
   )
 
   function openEdit(rider: RiderPerformance) {
-    setEditing(rider); setEditStore(rider.store_id ?? ''); setEditMot(rider.mot ?? 'rider')
+    setEditing(rider); setEditStore(rider.store_id ?? ''); setEditMot(rider.mot ?? 'rider'); setEditPassword('')
   }
 
   async function handleEditSave() {
@@ -58,7 +59,12 @@ export default function RidersPage() {
       await supabase.from('rider_store_assignments').update({ is_current: false }).eq('rider_id', editing.rider_id)
       await supabase.from('rider_store_assignments').insert({ rider_id: editing.rider_id, store_id: editStore, is_current: true })
     }
-    toast.success('Rider updated')
+    if (editPassword) {
+      if (editPassword.length < 6) { toast.error('Password must be at least 6 characters'); return }
+      const { error: pErr } = await updateUserAdmin({ user_id: editing.rider_id, password: editPassword })
+      if (pErr) { toast.error(`Saved, but password reset failed: ${pErr}`); setEditing(null); loadData(); return }
+    }
+    toast.success(editPassword ? 'Rider updated & password reset' : 'Rider updated')
     setEditing(null)
     loadData()
   }
@@ -233,6 +239,11 @@ export default function RidersPage() {
                 <option value="">Keep current</option>
                 {stores.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
               </select>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Reset password <span className="text-gray-400 font-normal">(optional)</span></label>
+              <input type="text" value={editPassword} onChange={e => setEditPassword(e.target.value)}
+                className="input-field" placeholder="Leave blank to keep current" />
             </div>
             <div className="flex gap-3">
               <button onClick={handleEditSave} className="btn-primary flex-1">Save</button>

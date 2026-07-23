@@ -37,6 +37,24 @@ export async function createUserAdmin(payload: {
   return {}
 }
 
+// Admin-only: reset a user's password (or change their email). Uses the
+// admin Edge Function so it never touches the caller's own session.
+export async function updateUserAdmin(payload: {
+  user_id: string; password?: string; email?: string
+}): Promise<{ error?: string }> {
+  const { data, error } = await supabase.functions.invoke('admin-update-user', { body: payload })
+  if (data?.error) return { error: data.error }
+  if (error) {
+    try {
+      const ctx = (error as unknown as { context?: Response }).context
+      const body = ctx ? await ctx.json() : null
+      if (body?.error) return { error: body.error }
+    } catch { /* ignore */ }
+    return { error: error.message }
+  }
+  return {}
+}
+
 export type SessionStatus =
   | 'waiting' | 'assigned' | 'accepted' | 'pickup_done'
   | 'in_transit' | 'arrived' | 'delivered' | 'returning' | 'completed' | 'failed'
