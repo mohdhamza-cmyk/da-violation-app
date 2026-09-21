@@ -1,38 +1,46 @@
 # QA harness
 
-Type-checks, builds, and drives the **real** app source
-(`../frontend/src/App.tsx`) — nothing here is a copy.
+Type-checks, builds and drives the **real** sources — `../frontend/src/App.tsx`
+and `../apps-script/Code.gs`. Nothing here is a reimplementation.
 
 ## Install
 ```bash
 cd qa && npm install
 ```
 
-## Type-check (catches type errors in App.tsx)
+## Backend (`Code.gs`)
 ```bash
-npm run typecheck
+node backend.test.mjs
 ```
+Loads the real `Code.gs` into a stubbed Apps Script runtime where
+**`getDataRange()` throws**, so any hot path that still reads the whole sheet
+fails the suite. Asserts both output and **cost** (which ranges were read):
+`?check` bounded to the ID column of the last 1000 rows, `?fileCount` opening no
+spreadsheet, `?since` reading only new rows, gen/cursor re-seed behaviour,
+snapshot chunking under the 100KB CacheService cap, and legacy back-compat.
 
-## Production build
+## Frontend
+```bash
+npm run typecheck   # tsc --noEmit on the real App.tsx
+npm run build       # vite production build
+node frontend.test.mjs
+```
+`frontend.test.mjs` extracts real functions (types stripped with esbuild, not
+regex) and checks unique-slot adherence — including mixed `"8:00 AM"` and
+ISO/date-serial `HourSlot` values — plus cache hygiene and the delta wire
+format, and asserts the removals (60s poll, `fetchSheet`, remount keys, error
+banner) stayed removed.
+
+## End-to-end (headless browser, backend mocked)
 ```bash
 npm run build
-```
-
-## End-to-end UI tests (headless browser, backend mocked)
-`drive.mjs` serves the built app and drives it in Chromium with the **new**
-Apps Script contract mocked via network interception, covering:
-1. Country selector gates the store list (UAE/KSA/Egypt; selecting a country filters stores)
-2. Admin dashboard fans out one fetch per country (UAE+KSA+Egypt)
-3. A KSA-scoped supervisor only fetches/sees KSA
-4. Backward compat: a legacy `?stores` payload (no `stores[]`) still works (UAE only)
-…and asserts zero runtime page errors throughout.
-
-```bash
-npm run build
-npm run preview &        # serves on :4173
-# If your Chromium needs an explicit binary (e.g. sandboxes without a bundled one):
+npm run preview &
+# if the environment has no bundled browser:
 #   export PW_CHROME=/path/to/chrome-or-headless_shell
-npm run e2e
+node drive.mjs
 ```
-
-Mock data + scenarios live in `drive.mjs` — extend as the app grows.
+Covers: tab switch fires **zero** network calls and shows no spinner with state
+preserved; reload serves from IndexedDB without re-downloading; a stale cache
+syncs via `?since` rather than re-seeding; a dead network leaves cached data on
+screen with **no error banner**; pull-to-refresh/force-re-sync is Admin-only
+while an L1 still sees their scoped data.

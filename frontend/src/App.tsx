@@ -1744,6 +1744,20 @@ function slotLabelToHour(label: string): number {
   if (/PM/i.test(m[2])) h += 12;
   return h;
 }
+
+// ── UNIQUE SLOT KEY (P5 / C5) ─────────────────────────────────────────────
+// Adherence is measured in UNIQUE (store, date, hour-slot) combinations, so a
+// retry — or a second genuine upload for the same slot — counts exactly once.
+// Every part of the key is normalized, which is what the old code got wrong:
+// calcAdh keyed on the RAW r.Store while the surrounding filter used norm(),
+// so "Deira" and "deira " were two different slots and inflated the count.
+// The slot itself is keyed by HOUR NUMBER, so a clean "8:00 AM" label and a
+// historical ISO / date-serial HourSlot collapse to the same slot.
+function slotKey(r: { Store: string; Date: string; HourSlot: string }): string {
+  const label = extractHourSlot(r.HourSlot);
+  const h = slotLabelToHour(label);
+  return norm(r.Store) + "|" + extractDate(r.Date) + "|" + (h >= 0 ? String(h) : norm(label));
+}
 function getLast7Dates(days = 7) {
   const d: string[] = [];
   for (let i = days - 1; i >= 0; i--) {
@@ -1802,13 +1816,19 @@ interface QueuedItem {
 
 const IDB_NAME = "ds_db";
 const IDB_STORE = "queue";
+// Second store: the dashboard's persistent row cache, keyed by the sheet's ID
+// column. Kept separate from the upload queue so the two never interfere.
+// DB version bumped 1 -> 2; existing queues are preserved by the guard below.
+const IDB_ROWS = "rows";
 function openDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open(IDB_NAME, 1);
+    const req = indexedDB.open(IDB_NAME, 2);
     req.onupgradeneeded = () => {
       const db = req.result;
       if (!db.objectStoreNames.contains(IDB_STORE))
         db.createObjectStore(IDB_STORE, { keyPath: "id" });
+      if (!db.objectStoreNames.contains(IDB_ROWS))
+        db.createObjectStore(IDB_ROWS, { keyPath: "ID" });
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
@@ -1862,6 +1882,273 @@ async function idbDelete(id: string): Promise<void> {
 async function idbCount(): Promise<number> {
   const items = await idbGetAll();
   return items.length;
+}
+
+// ── DASHBOARD DATA CONTROLLER (P6 / C1 / C2) ──────────────────────────────
+// A module-level store, so cached rows + the sync cursor survive EVERY mount
+// and unmount: tab switches, login/logout, re-renders. The dashboard renders
+// from here; the network only ever appends what's new.
+//
+// First run seeds one bounded window (?seed=1). After that every sync is a
+// delta (?since=<cursor>) carrying only new submissions — older data is served
+// from the device and never re-downloaded.
+async function idbPutRows(rows: SheetRow[]): Promise<void> {
+  if (rows.length === 0) return;
+  const db = await openDB();
+  return new Promise((resolve) => {
+    const tx = db.transaction(IDB_ROWS, "readwrite");
+    const os = tx.objectStore(IDB_ROWS);
+    rows.forEach((r) => {
+      if (r && r.ID != null && r.ID !== "") os.put(r);
+    });
+    tx.oncomplete = () => { db.close(); resolve(); };
+    tx.onerror = () => { db.close(); resolve(); };
+  });
+}
+async function idbAllRows(): Promise<SheetRow[]> {
+  const db = await openDB();
+  return new Promise((resolve) => {
+    const tx = db.transaction(IDB_ROWS, "readonly");
+    const req = tx.objectStore(IDB_ROWS).getAll();
+    req.onsuccess = () => { db.close(); resolve(req.result || []); };
+    req.onerror = () => { db.close(); resolve([]); };
+  });
+}
+async function idbClearRows(): Promise<void> {
+  const db = await openDB();
+  return new Promise((resolve) => {
+    const tx = db.transaction(IDB_ROWS, "readwrite");
+    tx.objectStore(IDB_ROWS).clear();
+    tx.oncomplete = () => { db.close(); resolve(); };
+    tx.onerror = () => { db.close(); resolve(); };
+  });
+}
+
+const SYNC_META_KEY = "ds_sync_meta_v1";
+const CACHE_WINDOW_DAYS = 11; // mirrors WINDOW_DAYS on the server
+const STALE_MS = 30 * 60 * 1000; // foreground-refresh threshold
+
+interface SyncMeta {
+  cursor: number;
+  gen: string;
+  lastSync: number;
+}
+function loadSyncMeta(): SyncMeta {
+  try {
+    const raw = localStorage.getItem(SYNC_META_KEY);
+    if (raw) {
+      const m = JSON.parse(raw);
+      return {
+        cursor: Number(m.cursor) || 0,
+        gen: String(m.gen || ""),
+        lastSync: Number(m.lastSync) || 0,
+      };
+    }
+  } catch {}
+  return { cursor: 0, gen: "", lastSync: 0 };
+}
+function saveSyncMeta(m: SyncMeta) {
+  try {
+    localStorage.setItem(SYNC_META_KEY, JSON.stringify(m));
+  } catch {}
+}
+
+interface DataState {
+  rows: SheetRow[];
+  meta: SyncMeta;
+  hydrated: boolean; // the IndexedDB read has completed
+  syncing: boolean; // a network sync is in flight — never rendered as a spinner
+}
+const DATA: DataState = {
+  rows: [],
+  meta: loadSyncMeta(),
+  hydrated: false,
+  syncing: false,
+};
+const dataListeners = new Set<() => void>();
+function emitData() {
+  dataListeners.forEach((fn) => {
+    try {
+      fn();
+    } catch {}
+  });
+}
+function subscribeData(fn: () => void) {
+  dataListeners.add(fn);
+  return () => {
+    dataListeners.delete(fn);
+  };
+}
+// Views read DATA directly; this hook just nudges React when it changes.
+function useDataStore(): DataState {
+  const [, bump] = useState(0);
+  useEffect(() => subscribeData(() => bump((n) => n + 1)), []);
+  return DATA;
+}
+
+// Keep the device cache bounded no matter how long the app stays installed.
+function cacheCutoffMs(): number {
+  const c = new Date();
+  c.setHours(0, 0, 0, 0);
+  c.setDate(c.getDate() - CACHE_WINDOW_DAYS);
+  return c.getTime();
+}
+function withinCacheWindow(r: SheetRow, cutoffMs: number): boolean {
+  let d = new Date(r.Date as any);
+  if (isNaN(d.getTime()) && r.Timestamp) d = new Date(r.Timestamp as any);
+  return isNaN(d.getTime()) ? true : d.getTime() >= cutoffMs; // keep undated rows
+}
+function isRealRow(r: any): boolean {
+  return !!(r && r.Store && r.Store !== "TEST" && r.Store !== "" && r.ID);
+}
+
+// The server sends compact [[...]] + headers (no repeated JSON keys). Expand to
+// the row objects the dashboard already understands.
+function rowsFromCompact(headers: string[], rows: any[][]): SheetRow[] {
+  if (!Array.isArray(headers) || !Array.isArray(rows)) return [];
+  return rows.map((arr) => {
+    const o: any = {};
+    for (let i = 0; i < headers.length; i++) o[headers[i]] = arr[i];
+    return o as SheetRow;
+  });
+}
+
+// Upsert by ID — a corrected/resubmitted row replaces the cached one.
+function mergeRows(incoming: SheetRow[]) {
+  if (incoming.length === 0) return;
+  const byId = new Map<string, SheetRow>();
+  DATA.rows.forEach((r) => byId.set(String(r.ID), r));
+  incoming.forEach((r) => {
+    if (isRealRow(r)) byId.set(String(r.ID), r);
+  });
+  const cut = cacheCutoffMs();
+  DATA.rows = Array.from(byId.values()).filter((r) => withinCacheWindow(r, cut));
+}
+
+// A GET that never throws and never surfaces an error. Returns null on ANY
+// failure — offline, timeout, throttle, or Google's HTML quota page.
+// P4a: a failed sync must leave the cached view exactly as it was.
+async function getJSONQuiet(url: string): Promise<any | null> {
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 25000);
+    const res = await fetch(url, { signal: ctrl.signal });
+    clearTimeout(timer);
+    const text = await res.text();
+    if (/too many scripts|<html|<!DOCTYPE/i.test(text)) return null; // quota page
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+// Load the cache into memory. Instant, offline-safe, no spinner.
+async function hydrateData(): Promise<void> {
+  try {
+    const rows = await idbAllRows();
+    const cut = cacheCutoffMs();
+    DATA.rows = rows.filter(isRealRow).filter((r) => withinCacheWindow(r, cut));
+  } catch {
+    DATA.rows = [];
+  }
+  DATA.meta = loadSyncMeta();
+  DATA.hydrated = true;
+  emitData();
+}
+
+// One bounded window fetch — only on a first-ever load or a forced re-sync.
+async function seedData(): Promise<boolean> {
+  const res = await getJSONQuiet(`${GOOGLE_SCRIPT_URL}?seed=1`);
+  if (!res || !Array.isArray(res.rows)) return false;
+  const cut = cacheCutoffMs();
+  const rows = rowsFromCompact(res.headers, res.rows).filter(isRealRow);
+  DATA.rows = rows.filter((r) => withinCacheWindow(r, cut));
+  DATA.meta = {
+    cursor: Number(res.cursor) || 0,
+    gen: String(res.gen || ""),
+    lastSync: Date.now(),
+  };
+  saveSyncMeta(DATA.meta);
+  try {
+    await idbClearRows();
+    await idbPutRows(DATA.rows);
+  } catch {}
+  emitData();
+  return true;
+}
+
+// The single sync entry point. Every trigger — hourly scheduler, foreground,
+// Admin pull-to-refresh — calls this. Tab switches call NOTHING.
+async function syncData(force = false): Promise<void> {
+  if (DATA.syncing) return;
+  DATA.syncing = true;
+  emitData();
+  try {
+    if (force || !DATA.meta.gen || !DATA.meta.cursor) {
+      await seedData(); // silently no-ops on failure
+      return;
+    }
+    const url =
+      `${GOOGLE_SCRIPT_URL}?since=${encodeURIComponent(String(DATA.meta.cursor))}` +
+      `&gen=${encodeURIComponent(DATA.meta.gen)}`;
+    const res = await getJSONQuiet(url);
+    if (!res) return; // P4a: keep cached data — no error, no spinner, no retry
+    if (res.reseed) {
+      await seedData(); // Current was rewritten by the nightly roll
+      return;
+    }
+    const rows = rowsFromCompact(res.headers || [], res.rows || []).filter(isRealRow);
+    if (rows.length > 0) {
+      mergeRows(rows);
+      try {
+        await idbPutRows(rows);
+      } catch {}
+    }
+    DATA.meta = {
+      cursor: Number(res.cursor) || DATA.meta.cursor,
+      gen: String(res.gen || DATA.meta.gen),
+      lastSync: Date.now(),
+    };
+    saveSyncMeta(DATA.meta);
+  } finally {
+    DATA.syncing = false;
+    emitData();
+  }
+}
+
+// ── AUTO-REFRESH SCHEDULER (P4 / C4) ──────────────────────────────────────
+// Fires just after the top of each hour, so the slot that just closed is
+// included, with jitter so devices don't all hit Apps Script on the same
+// second. This replaces the old 60s poll, which turned every open dashboard
+// into a request a minute and fed directly into the quota failures.
+let schedulerStarted = false;
+function startDataScheduler() {
+  if (schedulerStarted) return;
+  schedulerStarted = true;
+
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  function msToNextTick() {
+    const now = new Date();
+    const next = new Date(now);
+    next.setHours(now.getHours() + 1, 0, 30, 0); // HH:00:30
+    return next.getTime() - now.getTime() + Math.floor(Math.random() * 20000);
+  }
+  function schedule() {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      syncData().finally(schedule);
+    }, msToNextTick());
+  }
+  schedule();
+
+  // Returning to the app refreshes only when the data is actually stale.
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "visible") return;
+    if (Date.now() - DATA.meta.lastSync > STALE_MS) syncData();
+  });
+  window.addEventListener("online", () => {
+    if (Date.now() - DATA.meta.lastSync > STALE_MS) syncData();
+  });
 }
 
 // ── CHUNKED UPLOAD ORCHESTRATOR ────────────────────────────────────────────
@@ -2008,6 +2295,30 @@ async function sendUnit(record: any, u: UploadUnit) {
 // missing ones (not everything). Combined with exponential backoff, this stops
 // the old "one lagging file triggers a full re-upload" feedback loop that
 // amplified load at the top of every hour.
+// "found"   — the row is definitely in the sheet
+// "missing" — the server definitively says it is not there
+// "unknown" — we could not tell (offline, timeout, or the HTML quota page)
+//
+// This distinction IS the P2 fix. The old code collapsed "unknown" into
+// failure: `const res = await c.json()` throws on Google's quota page, so a
+// submission that HAD landed was recorded as failed, re-queued, and re-uploaded
+// in full — thousands of times a day, against a backend that was already
+// throttled. "unknown" now means "don't resend; just re-verify later".
+type Verdict = "found" | "missing" | "unknown";
+async function verifySubmission(record: any): Promise<Verdict> {
+  try {
+    const res = await fetch(
+      `${GOOGLE_SCRIPT_URL}?check=${encodeURIComponent(record.id)}`
+    );
+    const text = await res.text();
+    if (/too many scripts|<html|<!DOCTYPE/i.test(text)) return "unknown";
+    const j = JSON.parse(text);
+    return j.found === true ? "found" : "missing";
+  } catch {
+    return "unknown";
+  }
+}
+
 async function uploadSubmission(record: any, files: any[]): Promise<boolean> {
   const total = files.length;
   const { units, chunkPlan } = buildUnits(files);
@@ -2064,17 +2375,22 @@ async function uploadSubmission(record: any, files: any[]): Promise<boolean> {
   // 3. Finalize — write the Sheet row (idempotent server-side).
   await postJSON({ action: "finalize", ...record });
 
-  // 4. Verify the row landed, with backoff.
-  let ok = false;
-  for (let vtries = 0; vtries < 3 && !ok; vtries++) {
-    await sleep(vtries === 0 ? 4000 : 3500 * (vtries + 1));
-    try {
-      const c = await fetch(`${GOOGLE_SCRIPT_URL}?check=${record.id}`);
-      const res = await c.json();
-      ok = res.found === true;
-    } catch {}
+  // 4. Verify the row landed, with jittered + capped backoff.
+  let verdict: Verdict = "unknown";
+  for (let vtries = 0; vtries < 3; vtries++) {
+    // Capped exponential backoff plus jitter, so devices that submitted at the
+    // same instant do not also retry at the same instant.
+    const wait = Math.min(4000 * Math.pow(1.6, vtries), 12000);
+    await sleep(wait + Math.floor(Math.random() * 1500));
+    verdict = await verifySubmission(record);
+    if (verdict === "found") return true;
+    // Definitively absent → re-post finalize once (idempotent server-side).
+    // "unknown" deliberately does NOT trigger a resend.
+    if (verdict === "missing" && vtries < 2) {
+      await postJSON({ action: "finalize", ...record });
+    }
   }
-  return ok;
+  return false;
 }
 
 // Inject keyframe animations once (fade-in, slide-up, spinner)
@@ -2321,7 +2637,17 @@ function AdBadge({ pct }: { pct: number }) {
 }
 
 // ── UPLOAD VIEW ───────────────────────────────────────────────────────────
-function UploadView() {
+function UploadView({ active }: { active: boolean }) {
+  // This view now stays mounted while the user is on the Dashboard tab (see
+  // App()), which is what makes tab switching instant. Two consequences are
+  // handled deliberately: the hourly ALERT is suppressed while hidden (a
+  // manager reading the dashboard should not hear upload beeps), while the
+  // background upload-queue sync keeps running — queued submissions now drain
+  // even from the Dashboard tab, which they previously could not.
+  const activeRef = useRef(active);
+  useEffect(() => {
+    activeRef.current = active;
+  }, [active]);
   const [store, setStore] = useState("");
   const [nowHour, setNowHour] = useState(new Date().getHours());
   const [hourSlot, setHourSlot] = useState(getCurrentHourLabel());
@@ -2376,6 +2702,8 @@ function UploadView() {
 
   useEffect(() => {
     function startAlert() {
+      // Silent while the Upload tab is hidden — see the note on UploadView.
+      if (!activeRef.current) return;
       setAlertVisible(true);
       setCountdown(120);
       setHourSlot(getCurrentHourLabel());
@@ -2420,6 +2748,17 @@ function UploadView() {
       syncing = true;
       for (const item of queue) {
         try {
+          // Cheap pre-check FIRST. A queued item is very often a false failure:
+          // the row landed but verification couldn't confirm it under load. One
+          // ?check is a single bounded read; blindly re-running the upload costs
+          // ~15 file requests per item and is what turned a throttling blip into
+          // thousands of daily "failures" (P2).
+          const already = await verifySubmission(item.record);
+          if (already === "found") {
+            await idbDelete(item.id); // it was never actually lost
+            continue;
+          }
+          if (already === "unknown") continue; // still can't tell — next cycle
           const ok = await uploadSubmission(item.record, item.files);
           if (ok) await idbDelete(item.id); // confirmed — remove from queue
         } catch {
@@ -3569,17 +3908,30 @@ function FilterSelect({
 function DashboardView({
   user,
   onLogout,
+  active,
 }: {
   user: UserAccount;
   onLogout: () => void;
+  active: boolean; // false while hidden behind the Upload tab
 }) {
   // Scope the visible stores based on the logged-in user's role
   const SCOPED_STORES = getScopedStores(user);
   const canExport = true; // Admin, L1 (CM/Supervisor), L2 (TL) — all can export
-  const [sheetData, setSheetData] = useState<SheetRow[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-  const [lastRefresh, setLastRefresh] = useState("");
+  // Rows come from the module-level device cache, not component state, so they
+  // survive tab switches, logout/login and re-renders — with no re-fetch.
+  const data = useDataStore();
+  const sheetData = data.rows;
+  const isAdmin = user.role === "Admin";
+  // A quiet freshness stamp, nothing more. There is deliberately NO error
+  // state: a failed background sync must never surface a banner (P4a).
+  const lastRefresh = data.meta.lastSync
+    ? new Date(data.meta.lastSync).toLocaleTimeString("en-AE", {
+        hour: "2-digit",
+        minute: "2-digit",
+      })
+    : "";
+  // True only before the device cache has been read — never on a tab switch.
+  const loading = !data.hydrated;
   const [days, setDays] = useState(7);
   const [dbTab, setDbTab] = useState<
     | "overview"
@@ -3609,13 +3961,20 @@ function DashboardView({
 
   useEffect(() => {
     injectAnimations();
-    fetchSheet();
-    const iv = setInterval(() => fetchSheet(true), 60000);
-    return () => clearInterval(iv);
+    // No fetch on mount, and no polling. Cache hydration and the hourly
+    // scheduler are owned by App(), so switching tabs fires ZERO network calls
+    // and shows no spinner (P3/C3) — and the 60s poll that turned every open
+    // dashboard into a request a minute is gone (P4).
   }, []);
 
-  // ── PULL TO REFRESH ─────────────────────────────────────────────────────
+  // ── PULL TO REFRESH — ADMIN ONLY (P4) ───────────────────────────────────
+  // Manual refresh by every manager was a primary driver of the top-of-hour
+  // request storm, so it is removed for L1/L2, who now rely on the device cache
+  // plus the hourly auto-sync. Admins keep it, and additionally get a force
+  // full re-sync. Listeners are also inert while the dashboard is hidden
+  // behind the Upload tab.
   useEffect(() => {
+    if (!isAdmin || !active) return;
     function onTouchStart(e: TouchEvent) {
       if (window.scrollY <= 0) {
         pullRef.current.startY = e.touches[0].clientY;
@@ -3632,7 +3991,7 @@ function DashboardView({
     function onTouchEnd() {
       if (pullDist > 60) {
         setRefreshing(true);
-        fetchSheet().finally(() => setTimeout(() => setRefreshing(false), 600));
+        syncData().finally(() => setTimeout(() => setRefreshing(false), 600));
       }
       setPullDist(0);
       pullRef.current.pulling = false;
@@ -3645,71 +4004,7 @@ function DashboardView({
       window.removeEventListener("touchmove", onTouchMove);
       window.removeEventListener("touchend", onTouchEnd);
     };
-  }, [pullDist]);
-
-  async function fetchSheet(isAutoRefresh = false) {
-    // Up to 3 attempts with backoff. Uses a 25s timeout so a slow/busy server
-    // doesn't hang the dashboard forever. If Apps Script is over its execution
-    // quota it returns an HTML "too many scripts running" page (not JSON) — we
-    // detect that and show a friendly "server busy" message while keeping any
-    // data already on screen, instead of blanking out.
-    const delays = [0, 4000, 8000];
-    for (let attempt = 0; attempt < delays.length; attempt++) {
-      if (delays[attempt])
-        await new Promise((r) => setTimeout(r, delays[attempt]));
-      try {
-        const ctrl = new AbortController();
-        const timer = setTimeout(() => ctrl.abort(), 25000);
-        const res = await fetch(GOOGLE_SCRIPT_URL, { signal: ctrl.signal });
-        clearTimeout(timer);
-        const text = await res.text();
-        // Busy / quota page is HTML, not JSON
-        if (/too many scripts|<html|<!DOCTYPE/i.test(text)) {
-          if (attempt < delays.length - 1) continue; // retry after backoff
-          setError(
-            "Server busy (Google quota). Showing last data — retrying shortly."
-          );
-          setLoading(false);
-          return;
-        }
-        let raw: any;
-        try {
-          raw = JSON.parse(text);
-        } catch {
-          if (attempt < delays.length - 1) continue;
-          setError(
-            "Couldn't read server response. Showing last data — will retry."
-          );
-          setLoading(false);
-          return;
-        }
-        const clean = Array.isArray(raw)
-          ? raw.filter(
-              (r: any) => r.Store && r.Store !== "TEST" && r.Store !== ""
-            )
-          : [];
-        setSheetData(clean);
-        setLastRefresh(
-          new Date().toLocaleTimeString("en-AE", {
-            hour: "2-digit",
-            minute: "2-digit",
-          })
-        );
-        setLoading(false);
-        setError("");
-        return; // success
-      } catch (e: any) {
-        if (attempt < delays.length - 1) continue; // timeout/network — retry
-        // Final failure: keep any existing data on screen, just flag it
-        setError(
-          isAutoRefresh
-            ? "Couldn't refresh (server busy). Showing last data."
-            : "Server busy or unreachable. Pull down to retry."
-        );
-        setLoading(false);
-      }
-    }
-  }
+  }, [pullDist, isAdmin, active]);
 
   // ── CSV / EXCEL EXPORT ──────────────────────────────────────────────────
   // Exports the currently filtered store data (respects day range)
@@ -3797,11 +4092,7 @@ function DashboardView({
     // Count UNIQUE (store, date, hour-slot) combinations — two submissions for
     // the same store+slot count as ONE, so duplicates never inflate adherence.
     const uniq = new Set<string>();
-    rows.forEach((r) =>
-      uniq.add(
-        r.Store + "|" + extractDate(r.Date) + "|" + extractHourSlot(r.HourSlot)
-      )
-    );
+    rows.forEach((r) => uniq.add(slotKey(r)));
     const submitted = uniq.size;
     const expected = getTotalExpected(dates, stores.length);
     // Nothing due yet (e.g. before 8 AM) = compliant, not flagged
@@ -3816,12 +4107,10 @@ function DashboardView({
 
   const trendData = dates.map((date) => {
     const dayRows = filtered.filter(
-      (r) => extractDate(r.Date) === date && SCOPED_STORES.includes(r.Store)
+      (r) => extractDate(r.Date) === date && scopedSet.has(norm(r.Store))
     );
     const uniqDay = new Set<string>();
-    dayRows.forEach((r) =>
-      uniqDay.add(r.Store + "|" + extractHourSlot(r.HourSlot))
-    );
+    dayRows.forEach((r) => uniqDay.add(slotKey(r)));
     const elapsedToday = getElapsedSlots(date);
     const expectedToday = SCOPED_STORES.length * elapsedToday;
     const pct =
@@ -3839,7 +4128,8 @@ function DashboardView({
       const supStores = SCOPED_STORES.filter(
         (s) => STORE_MAPPING[s].supervisor === sup
       );
-      const rows = filtered.filter((r) => supStores.includes(r.Store));
+      const supSet = new Set(supStores.map(norm));
+      const rows = filtered.filter((r) => supSet.has(norm(r.Store)));
       const { submitted, expected, pct } = calcAdh(rows, supStores);
       const am = STORE_MAPPING[supStores[0]]?.am || "-";
       const cm = STORE_MAPPING[supStores[0]]?.cityManager || "-";
@@ -3861,7 +4151,8 @@ function DashboardView({
   const amData = amNames
     .map((am) => {
       const amStores = SCOPED_STORES.filter((s) => STORE_MAPPING[s].am === am);
-      const rows = filtered.filter((r) => amStores.includes(r.Store));
+      const amSet = new Set(amStores.map(norm));
+      const rows = filtered.filter((r) => amSet.has(norm(r.Store)));
       const { submitted, expected, pct } = calcAdh(rows, amStores);
       const cm = STORE_MAPPING[amStores[0]]?.cityManager || "-";
       return { am, cm, stores: amStores.length, submitted, expected, pct };
@@ -4027,7 +4318,7 @@ function DashboardView({
   // (rows are already sorted newest-first, so the first one seen wins).
   const gallerySeen = new Set<string>();
   const galleryRows = galleryRowsRaw.filter((r) => {
-    const key = extractDate(r.Date) + "|" + extractHourSlot(r.HourSlot);
+    const key = slotKey(r);
     if (gallerySeen.has(key)) return false;
     gallerySeen.add(key);
     return true;
@@ -4042,7 +4333,7 @@ function DashboardView({
   const drillDays = dates.map((date) => {
     const r = drillData.filter((x) => extractDate(x.Date) === date);
     const uniq = new Set<string>();
-    r.forEach((x) => uniq.add(extractHourSlot(x.HourSlot)));
+    r.forEach((x) => uniq.add(slotKey(x)));
     const elapsed = getElapsedSlots(date);
     const pct =
       elapsed === 0
@@ -4151,6 +4442,33 @@ function DashboardView({
           <div style={{ fontSize: 11, color: "#777", marginTop: 2 }}>
             {lastRefresh ? `Updated ${lastRefresh}` : "Loading data…"}
           </div>
+          {/* Admin-only escape hatch (P4): bypasses the delta cursor entirely
+              and re-seeds the whole window from the server. */}
+          {isAdmin && (
+            <button
+              onClick={() => {
+                setRefreshing(true);
+                syncData(true).finally(() =>
+                  setTimeout(() => setRefreshing(false), 600)
+                );
+              }}
+              disabled={data.syncing}
+              style={{
+                marginTop: 4,
+                background: "none",
+                border: "0.5px solid #3A3A3C",
+                borderRadius: 6,
+                padding: "3px 8px",
+                fontSize: 10,
+                fontWeight: 600,
+                color: data.syncing ? "#555" : "#999",
+                cursor: data.syncing ? "default" : "pointer",
+                fontFamily: "inherit",
+              }}
+            >
+              {data.syncing ? "Syncing…" : "Force full re-sync"}
+            </button>
+          )}
         </div>
       </div>
 
@@ -4338,7 +4656,10 @@ function DashboardView({
           </div>
         )}
 
-        {loading && (
+        {/* Spinner ONLY on a genuine first-ever load (empty cache, nothing
+            fetched yet). The moment the device cache holds anything we render
+            it immediately — so tab switches and failed syncs never spin. */}
+        {sheetData.length === 0 && (loading || data.syncing) && (
           <div
             style={{
               textAlign: "center",
@@ -4356,27 +4677,14 @@ function DashboardView({
             Loading data…
           </div>
         )}
-        {error && (
-          <div
-            style={{
-              margin: "4px 0 12px",
-              background: "#2A2A1A",
-              border: "0.5px solid #5A4A1A",
-              borderRadius: 8,
-              padding: "10px 14px",
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-            }}
-          >
-            <span style={{ fontSize: 14 }}>⚠️</span>
-            <span style={{ fontSize: 12, color: "#F5D000", flex: 1 }}>
-              {error}
-            </span>
-          </div>
-        )}
 
-        {!loading && (sheetData.length > 0 || !error) && (
+        {/* No error banner by design (P4a). A failed sync leaves the cached
+            view exactly as it was and waits for the next hourly sync; the only
+            freshness signal is the quiet "Updated HH:MM" stamp in the header.
+            The old banner + immediate retry hammered an already-throttled
+            backend and produced the back-to-back failures. */}
+
+        {(sheetData.length > 0 || !loading) && (
           <>
             {dbTab === "overview" && (
               <>
@@ -5616,6 +5924,10 @@ export default function App() {
   const [user, setUser] = useState<UserAccount | null>(loadSession());
   // Seed from the last successful fetch synchronously so the FIRST render
   // already uses the most recent known list (not the older hard-coded one).
+  // NOTE: storesVersion still forces a RE-RENDER when the live list arrives,
+  // but it is no longer used as a `key`. Using it as a key REMOUNTED both
+  // views and wiped their state — one of the two causes of the tab-switch
+  // reload (P3). A plain state bump refreshes the mapping in place instead.
   const [storesVersion, setStoresVersion] = useState(() =>
     seedStoreMappingFromCache() ? 1 : 0
   );
@@ -5629,6 +5941,28 @@ export default function App() {
     loadLiveStoreMapping().then((ok) => {
       if (ok) setStoresVersion((v) => v + 1);
     });
+  }, []);
+
+  // ── DATA LIFECYCLE (C1/C2/C4) ─────────────────────────────────────────
+  // Owned here, once, for the whole app: hydrate the device cache, then start
+  // the hourly scheduler. Because this sits ABOVE both views, switching tabs
+  // never re-runs it (P3/C3), and the dashboard keeps syncing on schedule even
+  // while the user is on the Upload tab.
+  useEffect(() => {
+    let cancelled = false;
+    hydrateData().then(() => {
+      if (cancelled) return;
+      startDataScheduler();
+      // Sync on open only when we have no cursor yet (first-ever load ⇒ seed)
+      // or the cache is genuinely stale. Submissions arrive hourly, so this
+      // avoids a redundant request every time the app is opened.
+      if (!DATA.meta.cursor || Date.now() - DATA.meta.lastSync > STALE_MS) {
+        syncData();
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   function handleLogin(u: UserAccount) {
@@ -5646,17 +5980,24 @@ export default function App() {
 
   return (
     <div style={{ background: "#1C1C1E", minHeight: "100vh" }}>
-      {view === "upload" && <UploadView key={`u${storesVersion}`} />}
-      {view === "dashboard" &&
-        (showLogin ? (
-          <LoginView onLogin={handleLogin} />
-        ) : (
+      {/* BOTH views stay MOUNTED; only visibility is toggled. Rendering them
+          conditionally unmounted the inactive one, destroying its scroll,
+          filter and tab state and forcing a refetch on every switch — the
+          other half of P3. Toggling display keeps switching instant and
+          network-free (C3). */}
+      <div style={{ display: view === "upload" ? "block" : "none" }}>
+        <UploadView active={view === "upload"} />
+      </div>
+      {user && (
+        <div style={{ display: view === "dashboard" ? "block" : "none" }}>
           <DashboardView
-            key={`d${storesVersion}`}
-            user={user!}
+            user={user}
             onLogout={handleLogout}
+            active={view === "dashboard"}
           />
-        ))}
+        </div>
+      )}
+      {showLogin && <LoginView onLogin={handleLogin} />}
       {/* FIX: a fixed element with transform:translateX(-50%) is unreliable on
           mobile browsers — the transform creates a containing block that makes
           the bar drift during scroll. Use full-width fixed + centered inner. */}
