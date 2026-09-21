@@ -79,167 +79,6 @@ function isWeekTabName(name) {
   return /^\d{4}-W\d{2}$/.test(String(name).trim());
 }
 
-// ── READ WINDOW, GENERATION & SNAPSHOT ────────────────────────────────────
-// WINDOW_DAYS bounds every bulk read. The dashboard only renders Today / 7 /
-// 10 days, so nothing older is ever shipped to a device.
-const WINDOW_DAYS = 11;
-
-// How far back ?check looks for a just-written row. A duplicate/verification is
-// always a retry of a very recent submission, so a bounded tail is sufficient —
-// and keeps the cost independent of total sheet size. Matches the window
-// `finalize` already uses for its idempotency scan.
-const CHECK_TAIL_ROWS = 1000;
-
-// GENERATION ("gen") changes whenever `Current` is REWRITTEN rather than
-// appended to — i.e. the daily roll, or a manual re-seed. Clients hold a ROW
-// CURSOR into Current, and a rewrite invalidates every such cursor. Without
-// this signal a client would silently skip or duplicate rows after the nightly
-// roll; with it, the client simply re-seeds.
-function currentGen_() {
-  const props = PropertiesService.getScriptProperties();
-  let g = props.getProperty("current_gen");
-  if (!g) { g = String(Date.now()); props.setProperty("current_gen", g); }
-  return g;
-}
-function bumpGen_() {
-  PropertiesService.getScriptProperties().setProperty("current_gen", String(Date.now()));
-}
-
-// Date cells come back as Date objects; normalize to ISO so the wire format is
-// stable no matter how a column happens to be formatted in the sheet.
-function serializeRow_(row) {
-  const out = new Array(row.length);
-  for (let i = 0; i < row.length; i++) {
-    const v = row[i];
-    out[i] = (v instanceof Date) ? v.toISOString() : v;
-  }
-  return out;
-}
-
-// A real data row inside the read window (undated rows are kept, as before).
-function rowInWindow_(row, dateIdx, tsIdx, cutoff) {
-  if (!row[0] || String(row[0]) === "TEST") return false;
-  let d = new Date(row[dateIdx]);
-  if (isNaN(d.getTime()) && tsIdx >= 0) d = new Date(row[tsIdx]);
-  return isNaN(d.getTime()) ? true : d >= cutoff;
-}
-
-// ── SNAPSHOT ──────────────────────────────────────────────────────────────
-// A cached copy of the Current window so the SEED read — the only expensive
-// read left in the system — is served from CacheService instead of hitting the
-// Spreadsheet service on a user's request. Rebuilt by a time trigger, or
-// lazily when stale. CacheService caps one value at 100KB, so we chunk it.
-const SNAP_PREFIX = "snap_v1_";
-const SNAP_TTL_SEC = 21600;              // 6h; the trigger refreshes long before this
-const SNAP_MAX_AGE_MS = 10 * 60 * 1000;  // treat as stale after 10 min
-const SNAP_CHUNK_CHARS = 90000;          // under the 100KB-per-value cap
-const SNAP_MAX_CHUNKS = 24;              // ~2.1MB ceiling; larger => serve live, don't cache
-
-function snapPut_(payload) {
-  const json = JSON.stringify(payload);
-  const n = Math.ceil(json.length / SNAP_CHUNK_CHARS);
-  if (n > SNAP_MAX_CHUNKS) return false; // too big to cache — caller serves live
-  const map = {};
-  for (let i = 0; i < n; i++) {
-    map[SNAP_PREFIX + i] = json.substring(i * SNAP_CHUNK_CHARS, (i + 1) * SNAP_CHUNK_CHARS);
-  }
-  map[SNAP_PREFIX + "meta"] = JSON.stringify({ n: n, builtAt: payload.builtAt, gen: payload.gen });
-  CacheService.getScriptCache().putAll(map, SNAP_TTL_SEC);
-  return true;
-}
-
-function snapGet_() {
-  const cache = CacheService.getScriptCache();
-  const metaRaw = cache.get(SNAP_PREFIX + "meta");
-  if (!metaRaw) return null;
-  let meta;
-  try { meta = JSON.parse(metaRaw); } catch (e) { return null; }
-  const keys = [];
-  for (let i = 0; i < meta.n; i++) keys.push(SNAP_PREFIX + i);
-  const got = cache.getAll(keys);
-  let json = "";
-  for (let i = 0; i < meta.n; i++) {
-    const part = got[SNAP_PREFIX + i];
-    if (part == null) return null; // a chunk expired — treat the whole snapshot as missing
-    json += part;
-  }
-  try { return JSON.parse(json); } catch (e) { return null; }
-}
-
-function snapClear_() {
-  const cache = CacheService.getScriptCache();
-  const metaRaw = cache.get(SNAP_PREFIX + "meta");
-  const keys = [SNAP_PREFIX + "meta"];
-  if (metaRaw) {
-    try {
-      const meta = JSON.parse(metaRaw);
-      for (let i = 0; i < meta.n; i++) keys.push(SNAP_PREFIX + i);
-    } catch (e) {}
-  }
-  cache.removeAll(keys);
-}
-
-// Reads the Current window ONCE and caches it. This is the only full-tab read
-// left, and it runs on a trigger — never on a user's request path.
-function buildSnapshot_() {
-  const sheet = getCurrentSheet();
-  const lastRow = sheet.getLastRow();
-  const lastCol = Math.max(sheet.getLastColumn(), SHEET_HEADERS.length);
-  const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
-  const dateIdx = headers.indexOf("Date");
-  const tsIdx = headers.indexOf("Timestamp");
-  const cutoff = new Date();
-  cutoff.setHours(0, 0, 0, 0);
-  cutoff.setDate(cutoff.getDate() - WINDOW_DAYS);
-
-  const rows = [];
-  if (lastRow >= 2) {
-    const values = sheet.getRange(2, 1, lastRow - 1, lastCol).getValues();
-    for (let i = 0; i < values.length; i++) {
-      if (rowInWindow_(values[i], dateIdx, tsIdx, cutoff)) rows.push(serializeRow_(values[i]));
-    }
-  }
-  const payload = {
-    gen: currentGen_(),
-    cursor: lastRow,   // the client resumes deltas from this row index
-    headers: headers,
-    rows: rows,
-    count: rows.length,
-    builtAt: Date.now()
-  };
-  snapPut_(payload);
-  return payload;
-}
-
-// Serve a snapshot, rebuilding only when stale. Under concurrent load exactly
-// ONE request rebuilds; everyone else serves the slightly-stale copy instead of
-// piling onto the Spreadsheet service — which is precisely what produced the
-// "Too many scripts running simultaneously" HTML page.
-function getSnapshot_() {
-  const snap = snapGet_();
-  const gen = currentGen_();
-  const fresh = snap && snap.gen === gen && (Date.now() - (snap.builtAt || 0) < SNAP_MAX_AGE_MS);
-  if (fresh) return snap;
-
-  const lock = LockService.getScriptLock();
-  const got = lock.tryLock(500);
-  if (!got && snap) return snap; // another execution is rebuilding — stale is fine
-  try {
-    const again = snapGet_();
-    if (again && again.gen === gen && (Date.now() - (again.builtAt || 0) < SNAP_MAX_AGE_MS)) {
-      return again;
-    }
-    return buildSnapshot_();
-  } finally {
-    if (got) { try { lock.releaseLock(); } catch (e) {} }
-  }
-}
-
-// Time-trigger entry point (installed by ensureMaintenanceTriggers).
-function rebuildSnapshot() {
-  buildSnapshot_();
-}
-
 // The tab the app reads from and new rows are written to. Created on demand.
 function getCurrentSheet() {
   const ss = SpreadsheetApp.openById(SHEET_ID);
@@ -354,7 +193,7 @@ function rollCurrentToWeeklyTabs() {
       }
       const toAppend = [];
       entries.forEach(function (e) {
-        moved[e.idx] = true; // this week is processed -> row leaves Current either way
+        moved[e.idx] = true; // this week is processed → row leaves Current either way
         const id = idIdx >= 0 ? String(e.row[idIdx]) : "";
         if (id && existing[id]) return; // already filed by a prior partial run
         toAppend.push(e.row);
@@ -376,11 +215,6 @@ function rollCurrentToWeeklyTabs() {
     cur.getRange(1, 1, 1, headers.length).setValues([headers]);
     if (keep.length > 0) cur.getRange(2, 1, keep.length, keep[0].length).setValues(keep);
     cur.setFrozenRows(1);
-    // Current was REWRITTEN, so every client's row cursor is now meaningless.
-    // Bump the generation and drop the snapshot: clients see the gen change on
-    // their next delta and re-seed instead of skipping or duplicating rows.
-    bumpGen_();
-    snapClear_();
     return moreRemaining;
   } finally {
     try { lock.releaseLock(); } catch (e) {}
@@ -402,7 +236,7 @@ function rollCurrentToWeeklyTabs() {
 // NON-DESTRUCTIVE: the source tab is never touched — verify the weekly tabs,
 // then delete the source yourself if you want.
 function migrateSheet1ToWeeklyTabs() {
-  const WEEKS_PER_RUN = 6;              // small batches -> avoids service timeouts
+  const WEEKS_PER_RUN = 6;              // small batches → avoids service timeouts
   const MAX_MS = 4 * 60 * 1000;         // hard stop well under the 6-min limit
   const startTime = Date.now();
 
@@ -467,7 +301,7 @@ function migrateSheet1ToWeeklyTabs() {
     }
 
     const sh = withRetry(function () { return weekSheet(wk); });
-    // Existing IDs in this week tab -> complete a partial week without duplicates.
+    // Existing IDs in this week tab → complete a partial week without duplicates.
     const existing = {};
     if (idIdx >= 0 && sh.getLastRow() >= 2) {
       const ids = withRetry(function () {
@@ -535,9 +369,6 @@ function seedCurrentFromHistory() {
   cur.appendRow(headers);
   cur.setFrozenRows(1);
   if (recent.length > 0) cur.getRange(2, 1, recent.length, recent[0].length).setValues(recent);
-  // Current was rebuilt from scratch — invalidate client cursors (see bumpGen_).
-  bumpGen_();
-  snapClear_();
   Logger.log("Seeded Current with " + recent.length + " rows from the last " + CURRENT_DAYS + " days.");
 }
 
@@ -784,35 +615,31 @@ function clearStoreCache() {
   CacheService.getScriptCache().remove("store_mapping_v1");
 }
 
-function doGet(e) {
-  const P = (e && e.parameter) ? e.parameter : {};
-  const json = function (obj) {
-    return ContentService.createTextOutput(JSON.stringify(obj))
-      .setMimeType(ContentService.MimeType.JSON);
-  };
-
+function doGetLegacy_(e) {
   // ── LIVE STORE LIST: ?stores ─────────────────────────────────────────
   // Reads the store-list spreadsheet (Store | TL | Supervisor | AM | City
   // Manager) and returns the mapping as JSON. Cached 10 min so the dashboard
   // and upload screen stay fast. Changing that sheet updates the app
   // automatically (within the cache window) — no redeploy needed.
-  if (P.stores !== undefined) {
+  if (e && e.parameter && e.parameter.stores !== undefined) {
     return ContentService.createTextOutput(getStoreMappingJSON())
       .setMimeType(ContentService.MimeType.JSON);
   }
 
+  // Reads/verifies come from the small, fast "Current" tab (last ~15 days).
+  const sheet = getCurrentSheet();
+
   // ── FILE COUNT: ?fileCount=ID&store=X&date=Y&slot=Z ──────────────────
-  // How many of this record's files are in its folder, plus WHICH indices are
-  // present, so the app resends only what's missing.
-  // NOTE: this no longer opens the spreadsheet. `getCurrentSheet()` used to run
-  // ABOVE this branch, so every file-count ping opened the whole Spreadsheet —
-  // ~3 per submission across 166 stores at the top of each hour — to read data
-  // this endpoint never looks at.
-  if (P.fileCount) {
-    const recId = String(P.fileCount);
+  // Returns how many files for this record are saved in its folder so the
+  // app can confirm all files landed before finalizing.
+  if (e && e.parameter && e.parameter.fileCount) {
+    const recId = String(e.parameter.fileCount);
     try {
-      const hourFolder = getHourFolder(P.store, P.date, P.slot);
+      const hourFolder = getHourFolder(e.parameter.store, e.parameter.date, e.parameter.slot);
       const prefix = recId + "__";
+      // Also return WHICH file indices are present (parsed from names shaped
+      // "<recordId>__<index>__..."), so the app can resend only the missing
+      // files on retry instead of re-uploading everything.
       const indexSet = {};
       const fit = hourFolder.getFiles();
       while (fit.hasNext()) {
@@ -823,104 +650,55 @@ function doGet(e) {
         if (!isNaN(idx)) indexSet[idx] = true;
       }
       const indices = Object.keys(indexSet).map(function (n) { return parseInt(n, 10); });
-      return json({ count: indices.length, indices: indices });
+      return ContentService.createTextOutput(JSON.stringify({ count: indices.length, indices: indices })).setMimeType(ContentService.MimeType.JSON);
     } catch (err) {
-      return json({ count: 0, indices: [] });
+      return ContentService.createTextOutput(JSON.stringify({ count: 0, indices: [] })).setMimeType(ContentService.MimeType.JSON);
     }
   }
 
   // ── FAST VERIFICATION: ?check=RECORD_ID ──────────────────────────────
-  // Reads ONLY the ID column of the last ~1000 rows — never the whole tab.
-  // The old code ran `sheet.getDataRange().getValues()`, pulling every row x
-  // every column on EVERY verification (up to 3 per submission, ~166 stores
-  // firing at once). That one line was the main generator of the "Too many
-  // scripts running simultaneously" page — which then made this very endpoint
-  // fail, marking landed submissions as failed and re-queueing them.
-  //
-  // Deliberately NOT served from the snapshot: finalize->check happens within
-  // seconds, and a stale snapshot would report a row that DID land as missing,
-  // recreating the exact false-failure loop this is meant to kill.
-  if (P.check) {
-    const targetId = String(P.check);
-    const sheet = getCurrentSheet();
-    const lastRow = sheet.getLastRow();
-    if (lastRow < 2) return json({ found: false });
-    // +1 so the span is exactly CHECK_TAIL_ROWS rows, not one more.
-    const from = Math.max(2, lastRow - CHECK_TAIL_ROWS + 1);
-    const ids = sheet.getRange(from, 1, lastRow - from + 1, 1).getValues();
-    for (let i = ids.length - 1; i >= 0; i--) {
-      if (String(ids[i][0]) === targetId) return json({ found: true });
+  if (e && e.parameter && e.parameter.check) {
+    const targetId = String(e.parameter.check);
+    const data = sheet.getDataRange().getValues();
+    const headers = data[0];
+    const idCol = headers.indexOf("ID");
+    if (idCol === -1) {
+      return ContentService.createTextOutput(JSON.stringify({ found: false })).setMimeType(ContentService.MimeType.JSON);
     }
-    return json({ found: false });
+    for (let i = data.length - 1; i >= 1; i--) {
+      if (String(data[i][idCol]) === targetId) {
+        return ContentService.createTextOutput(JSON.stringify({ found: true })).setMimeType(ContentService.MimeType.JSON);
+      }
+    }
+    return ContentService.createTextOutput(JSON.stringify({ found: false })).setMimeType(ContentService.MimeType.JSON);
   }
 
-  // ── SEED: ?seed=1 ────────────────────────────────────────────────────
-  // The single bounded window fetch that primes a device's local cache. Served
-  // from the cached snapshot, so N devices seeding costs ~0 Spreadsheet reads.
-  // Compact [[...]] + headers (no repeated JSON keys), plus the cursor and gen
-  // the client resumes delta syncing from.
-  if (P.seed !== undefined) {
-    const snap = getSnapshot_();
-    return json({
-      gen: snap.gen,
-      cursor: snap.cursor,
-      headers: snap.headers,
-      rows: snap.rows,
-      count: snap.count,
-      builtAt: snap.builtAt
+  // ── FULL DATA FETCH for dashboard ────────────────────────────────────
+  // Return only the last ~11 days (covers the app's Today/7/10-day views with a
+  // buffer). Bounds the response size regardless of how big Current gets, so
+  // the dashboard stays fast and doesn't strain the execution quota.
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0];
+  const dateIdx = headers.indexOf("Date");
+  const tsIdx = headers.indexOf("Timestamp");
+  const cutoff = new Date();
+  cutoff.setHours(0, 0, 0, 0);
+  cutoff.setDate(cutoff.getDate() - 11);
+  const rows = data.slice(1)
+    .filter(row => {
+      if (!row[0] || row[0] === 'TEST') return false;
+      let d = new Date(row[dateIdx]);
+      if (isNaN(d.getTime()) && tsIdx >= 0) d = new Date(row[tsIdx]);
+      return isNaN(d.getTime()) ? true : d >= cutoff; // keep undated rows just in case
+    })
+    .map(row => {
+      const obj = {};
+      headers.forEach((h, i) => obj[h] = row[i]);
+      return obj;
     });
-  }
-
-  // ── DELTA: ?since=<cursor>&gen=<gen> ─────────────────────────────────
-  // ONLY the rows appended after the client's cursor. Cost is O(new rows) and
-  // is independent of how large Current or the history grows — this is the hot
-  // path every device hits once an hour.
-  //
-  // `Current` is append-only between rolls, so a row index is a valid cursor.
-  // The nightly roll REWRITES Current, which is why gen exists: a gen mismatch
-  // (or an impossible cursor) tells the client to re-seed rather than silently
-  // skip or duplicate rows.
-  if (P.since !== undefined) {
-    const gen = currentGen_();
-    if (String(P.gen || "") !== gen) return json({ reseed: true, gen: gen });
-
-    const sheet = getCurrentSheet();
-    const lastRow = sheet.getLastRow();
-    const since = Math.max(1, parseInt(P.since, 10) || 1);
-    if (since > lastRow) return json({ reseed: true, gen: gen }); // Current shrank unexpectedly
-    if (lastRow <= since) {
-      return json({ gen: gen, cursor: lastRow, headers: [], rows: [], count: 0 });
-    }
-
-    const lastCol = Math.max(sheet.getLastColumn(), SHEET_HEADERS.length);
-    const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
-    const dateIdx = headers.indexOf("Date");
-    const tsIdx = headers.indexOf("Timestamp");
-    const cutoff = new Date();
-    cutoff.setHours(0, 0, 0, 0);
-    cutoff.setDate(cutoff.getDate() - WINDOW_DAYS);
-
-    const values = sheet.getRange(since + 1, 1, lastRow - since, lastCol).getValues();
-    const rows = [];
-    for (let i = 0; i < values.length; i++) {
-      if (rowInWindow_(values[i], dateIdx, tsIdx, cutoff)) rows.push(serializeRow_(values[i]));
-    }
-    return json({ gen: gen, cursor: lastRow, headers: headers, rows: rows, count: rows.length });
-  }
-
-  // ── LEGACY FULL FETCH (no parameters) ────────────────────────────────
-  // Unchanged wire format — an array of row OBJECTS for the last WINDOW_DAYS —
-  // so a browser still running the PREVIOUS App.tsx keeps working after this
-  // script is deployed. Now served from the snapshot instead of a live
-  // full-tab read, so even the old client no longer strains the quota.
-  const snap = getSnapshot_();
-  const headers = snap.headers;
-  const out = snap.rows.map(function (row) {
-    const obj = {};
-    for (let i = 0; i < headers.length; i++) obj[headers[i]] = row[i];
-    return obj;
-  });
-  return json(out);
+  return ContentService
+    .createTextOutput(JSON.stringify(rows))
+    .setMimeType(ContentService.MimeType.JSON);
 }
 
 function purgeOldFiles() {
@@ -1013,11 +791,6 @@ function purgeOldFiles() {
           : "Nothing to delete")
   ]);
 
-  // The roll rewrites Current and drops the snapshot. Rebuild it once here, at
-  // the end of maintenance, so the first dashboard to open afterwards is served
-  // from cache instead of paying for a full-tab read itself.
-  try { buildSnapshot_(); } catch (e) {}
-
   // ── SELF-RESCHEDULE ───────────────────────────────────────────────────
   // If the file purge OR the weekly roll still has backlog, schedule a one-time
   // trigger to resume in ~2 minutes. When both finish clean, remove any leftover
@@ -1054,31 +827,6 @@ function purgeCatchUp() {
   purgeOldFiles();
 }
 
-// ── TRIGGER INSTALLER ─────────────────────────────────────────────────────
-// Run ONCE from the editor after deploying. Idempotent: existing triggers for
-// these handlers are deleted first, so pressing Run twice never stacks copies.
-//
-// Installs:
-//   1. purgeOldFiles   — daily (~3 AM). Purges Drive files past retention AND
-//                        rolls aged rows out of Current into weekly tabs.
-//   2. rebuildSnapshot — every 10 minutes. Keeps the cached read snapshot warm
-//                        so dashboard seeds never touch the Spreadsheet service.
-//
-// 10 minutes is the recommended interval: it matches SNAP_MAX_AGE_MS, costs
-// ~144 executions/day (comfortably inside quota), and means a seed is at most
-// 10 minutes stale — which is harmless, because the client immediately deltas
-// forward from the snapshot's own cursor and catches up in one cheap call.
-function ensureMaintenanceTriggers() {
-  const wanted = ["purgeOldFiles", "rebuildSnapshot"];
-  ScriptApp.getProjectTriggers().forEach(function (t) {
-    if (wanted.indexOf(t.getHandlerFunction()) !== -1) ScriptApp.deleteTrigger(t);
-  });
-  ScriptApp.newTrigger("purgeOldFiles").timeBased().everyDays(1).atHour(3).create();
-  ScriptApp.newTrigger("rebuildSnapshot").timeBased().everyMinutes(10).create();
-  buildSnapshot_(); // prime immediately so the very first read is already cached
-  Logger.log("Installed: purgeOldFiles (daily ~3 AM) + rebuildSnapshot (every 10 min). Snapshot primed.");
-}
-
 function testSheet() {
   const sheet = getCurrentSheet();
   sheet.appendRow(["TEST", new Date().toISOString(), "Connection OK"]);
@@ -1090,8 +838,8 @@ function testSheet() {
 // 2. Send this WhatsApp message to it: "I allow callmebot to send me messages"
 // 3. You'll receive an API key. Paste it into WHATSAPP_API_KEY below
 // 4. Put your number (with country code, no +) into WHATSAPP_PHONE
-const WHATSAPP_PHONE = "971500000000";        // <- your number, e.g. 9715XXXXXXXX
-const WHATSAPP_API_KEY = "PASTE_YOUR_KEY";    // <- key from CallMeBot
+const WHATSAPP_PHONE = "971500000000";        // ← your number, e.g. 9715XXXXXXXX
+const WHATSAPP_API_KEY = "PASTE_YOUR_KEY";    // ← key from CallMeBot
 
 function sendWhatsApp(message) {
   if (WHATSAPP_API_KEY === "PASTE_YOUR_KEY") {
@@ -1141,7 +889,7 @@ function sendDailyFlaggedAlert() {
     }
   }
 
-  // Expected slots elapsed so far today (8AM-10PM = 14 slots)
+  // Expected slots elapsed so far today (8AM–10PM = 14 slots)
   const hour = now.getHours();
   let elapsed = 0;
   if (hour >= 8 && hour < 22) elapsed = hour - 8;
@@ -1156,9 +904,9 @@ function sendDailyFlaggedAlert() {
   }
 
   if (flagged.length === 0) {
-    sendWhatsApp("OK: noon Minutes — All stores meeting 90% adherence as of " + hour + ":00. Great work!");
+    sendWhatsApp("✅ noon Minutes — All stores meeting 90% adherence as of " + hour + ":00. Great work!");
   } else {
-    const msg = "WARNING: noon Minutes — Flagged stores (below 90%) as of " + hour + ":00:\n\n"
+    const msg = "⚠️ noon Minutes — Flagged stores (below 90%) as of " + hour + ":00:\n\n"
       + flagged.slice(0, 30).join("\n")
       + (flagged.length > 30 ? "\n\n…and " + (flagged.length - 30) + " more" : "");
     sendWhatsApp(msg);

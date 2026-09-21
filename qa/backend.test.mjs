@@ -5,7 +5,8 @@
 import fs from "fs";
 import vm from "vm";
 
-const SRC = fs.readFileSync("apps-script/Code.gs", "utf8");
+const SRC = fs.readFileSync("apps-script/Code.gs", "utf8") + "\n" +
+            fs.readFileSync("apps-script/Snapshot.gs", "utf8");
 const HEADERS = ["ID","Timestamp","Date","HourSlot","Store","TL","Supervisor","AM","CityManager",
   "Inside_Count","Outside_Count","Parking_Count","TotalFiles","DriveLink","FileLinks","Week"];
 const MONTHS=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
@@ -35,11 +36,13 @@ function makeCtx({ dataRows = 5000, oldRows = 200 } = {}) {
       reads.push({ r, c, nr, nc });
       return {
         getValues: () => grid.slice(r - 1, r - 1 + nr).map(row => row.slice(c - 1, c - 1 + nc)),
-        setValues: () => {}, setValue: () => {}, getValue: () => "Week",
+        setValues: () => {}, setValue: () => {},
+        getValue: () => (grid[r - 1] && grid[r - 1][c - 1] !== undefined ? grid[r - 1][c - 1] : ""),
         setBackground(){return this;}, setFontColor(){return this;}, setFontWeight(){return this;},
       };
     },
     appendRow: (r) => grid.push(r),
+    __roll: (n) => { grid.splice(1, n); },   // drop the n oldest data rows, as the roll does
     clearContents: () => {}, setFrozenRows: () => {}, getName: () => "Current",
   };
   const ss = {
@@ -152,15 +155,27 @@ console.log("\n[C2] delta returns only new rows, and re-seeds on gen change");
   ok(impossible.reseed === true, "impossible cursor ⇒ reseed");
 }
 
-console.log("\n[C2] the nightly roll invalidates cursors (gen bump)");
+console.log("\n[C2] the nightly roll invalidates cursors (gen derived from oldest row)");
 {
-  const { call, run } = makeCtx({ dataRows: 100 });
+  const { call, run } = makeCtx({ dataRows: 100, oldRows: 20 });
   const seed = call({ seed: 1 });
-  run("bumpGen_(); snapClear_();");                 // what rollCurrentToWeeklyTabs does
+  // A real roll MOVES the oldest rows out of Current and rewrites the tab.
+  run(`(function(){ var s = SpreadsheetApp.openById("x").getSheetByName("Current");
+        s.__roll(20); })()`);
+  run('CacheService.getScriptCache().remove("cur_gen_v1");'); // simulate the 30s TTL
   const after = call({ since: seed.cursor, gen: seed.gen });
-  ok(after.reseed === true, "client with a pre-roll cursor is told to re-seed");
+  ok(after.reseed === true, "a client holding a pre-roll cursor is told to re-seed");
   const reseeded = call({ seed: 1 });
   ok(reseeded.gen !== seed.gen, "a fresh seed carries the new gen");
+  ok(reseeded.gen !== "empty" && reseeded.count > 0, "re-seed still returns rows");
+  // Appending must NOT change gen - otherwise every submission forces a reseed.
+  run(`(function(){ var s = SpreadsheetApp.openById("x").getSheetByName("Current");
+        s.appendRow(["appended", new Date().toISOString(), ${JSON.stringify(fmt(0))},
+          "10:00 AM","Store 1","T","S","A","C",5,5,5,15,"l","f",""]); })()`);
+  run('CacheService.getScriptCache().remove("cur_gen_v1");');
+  const afterAppend = call({ since: reseeded.cursor, gen: reseeded.gen });
+  ok(afterAppend.reseed !== true, "appending a row does NOT invalidate the cursor");
+  ok(afterAppend.count === 1, "the appended row arrives as a 1-row delta");
 }
 
 console.log("\n[Back-compat] legacy no-param fetch keeps the old object format");
