@@ -5,7 +5,6 @@ interface StoreInfo {
   supervisor: string;
   am: string;
   cityManager: string;
-  country?: string; // defaults to DEFAULT_COUNTRY when absent (legacy/hardcoded)
 }
 interface FileItem {
   id: string;
@@ -19,7 +18,6 @@ interface Submission {
   timestamp: string;
   date: string;
   hourSlot: string;
-  country: string;
   store: string;
   tl: string;
   supervisor: string;
@@ -48,8 +46,6 @@ interface SheetRow {
   TotalFiles: string;
   DriveLink?: string;
   FileLinks?: string;
-  Week?: string;
-  Country?: string;
 }
 
 // Hardcoded mapping below is the FALLBACK. On load the app fetches the live
@@ -1070,28 +1066,6 @@ let STORE_MAPPING: Record<string, StoreInfo> = {
 };
 
 let STORE_NAMES = Object.keys(STORE_MAPPING);
-// Country-aware, collision-safe list: each row carries its own country. The
-// hardcoded fallback is all UAE. Built from the live ?stores `stores[]` payload.
-interface StoreRow {
-  country: string;
-  store: string;
-  tl: string;
-  supervisor: string;
-  am: string;
-  cityManager: string;
-}
-let STORE_ROWS: StoreRow[] = STORE_NAMES.map((s) => ({
-  country: "UAE",
-  store: s,
-  tl: STORE_MAPPING[s].tl,
-  supervisor: STORE_MAPPING[s].supervisor,
-  am: STORE_MAPPING[s].am,
-  cityManager: STORE_MAPPING[s].cityManager,
-}));
-// A store's country (defaults to UAE for legacy/hardcoded entries).
-function storeCountry(store: string): string {
-  return normCountry(STORE_MAPPING[store] && STORE_MAPPING[store].country);
-}
 const SECTIONS = [
   {
     id: "inside",
@@ -1119,33 +1093,6 @@ type SectionId = (typeof SECTIONS)[number]["id"];
 const SHIFT_START = 8; // first slot: 8 AM
 const SHIFT_END = 23; // last slot is 10 PM (22:00); its window runs until 11 PM (23:00)
 const TOTAL_SHIFT_SLOTS = 15; // 8 AM, 9 AM … 10 PM = 15 hourly slots
-
-// ── COUNTRIES ─────────────────────────────────────────────────────────────
-// The 8 AM–10 PM shift is the same in every country, but the clock differs:
-// slots and adherence are computed in each country's LOCAL time via its fixed
-// UTC offset (none of these observe DST). UAE is the default so all existing
-// data/users keep working unchanged.
-const DEFAULT_COUNTRY = "UAE";
-const COUNTRIES = ["UAE", "KSA", "Egypt", "Bahrain", "Qatar", "Kuwait"] as const;
-type Country = (typeof COUNTRIES)[number];
-const COUNTRY_UTC_OFFSET: Record<string, number> = {
-  UAE: 4, KSA: 3, Bahrain: 3, Qatar: 3, Kuwait: 3, Egypt: 2,
-};
-function normCountry(v?: string): string {
-  const s = String(v || "").trim();
-  if (!s) return DEFAULT_COUNTRY;
-  const hit = COUNTRIES.find((c) => c.toLowerCase() === s.toLowerCase());
-  return hit || s;
-}
-// "Now" as a Date shifted into the given country's wall-clock, so getHours()/
-// getDate() read that country's local time regardless of the device timezone.
-function nowInCountry(country?: string): Date {
-  const off = COUNTRY_UTC_OFFSET[normCountry(country)];
-  if (off === undefined) return new Date();
-  const now = new Date();
-  return new Date(now.getTime() + (off * 60 + now.getTimezoneOffset()) * 60000);
-}
-
 const GOOGLE_SCRIPT_URL =
   "https://script.google.com/macros/s/AKfycbyiJJaYSiTuYnjuM_L3Ejwp1mDdp8el0g--MO4FRf0RJ-lLsCsB4oTxd0CPKTNlijmxPQ/exec";
 const THRESHOLD = 90;
@@ -1157,36 +1104,10 @@ const THRESHOLD = 90;
 //   3. Hard-coded list above — only on a first-ever load with no connectivity
 // On every successful fetch we cache the result, so the app stays current even
 // when the sheet is briefly unreachable.
-const STORE_CACHE_KEY = "ds_store_mapping_v2";
+const STORE_CACHE_KEY = "ds_store_mapping_v1";
 
-// Prefer the country-aware `stores[]` payload; fall back to legacy order/mapping
-// (treated as all UAE) so an old backend still works.
-function applyStoreMapping(
-  order: string[],
-  mapping: Record<string, any>,
-  stores?: any[]
-) {
+function applyStoreMapping(order: string[], mapping: Record<string, any>) {
   const m: Record<string, StoreInfo> = {};
-  if (Array.isArray(stores) && stores.length) {
-    const names: string[] = [];
-    const rows: StoreRow[] = [];
-    stores.forEach((r) => {
-      const info: StoreInfo = {
-        tl: r.tl || "",
-        supervisor: r.supervisor || "",
-        am: r.am || "",
-        cityManager: r.cityManager || "",
-        country: normCountry(r.country),
-      };
-      m[r.store] = info; // name-keyed for POC lookup (country-selected upload)
-      names.push(r.store);
-      rows.push({ country: info.country!, store: r.store, tl: info.tl, supervisor: info.supervisor, am: info.am, cityManager: info.cityManager });
-    });
-    STORE_MAPPING = m;
-    STORE_NAMES = names;
-    STORE_ROWS = rows;
-    return;
-  }
   order.forEach((s: string) => {
     const r = mapping[s] || {};
     m[s] = {
@@ -1194,12 +1115,10 @@ function applyStoreMapping(
       supervisor: r.supervisor || "",
       am: r.am || "",
       cityManager: r.cityManager || "",
-      country: DEFAULT_COUNTRY,
     };
   });
   STORE_MAPPING = m;
   STORE_NAMES = order.slice();
-  STORE_ROWS = order.map((s) => ({ country: DEFAULT_COUNTRY, store: s, tl: m[s].tl, supervisor: m[s].supervisor, am: m[s].am, cityManager: m[s].cityManager }));
 }
 
 // Seed from the last successful fetch (if any) BEFORE the network call, so even
@@ -1210,10 +1129,6 @@ function seedStoreMappingFromCache(): boolean {
     const raw = localStorage.getItem(STORE_CACHE_KEY);
     if (!raw) return false;
     const data = JSON.parse(raw);
-    if (data && Array.isArray(data.stores) && data.stores.length > 0) {
-      applyStoreMapping(data.order || [], data.mapping || {}, data.stores);
-      return true;
-    }
     if (
       data &&
       data.mapping &&
@@ -1231,10 +1146,13 @@ async function loadLiveStoreMapping(): Promise<boolean> {
   try {
     const res = await fetch(`${GOOGLE_SCRIPT_URL}?stores=1`);
     const data = await res.json();
-    const hasStores = data && Array.isArray(data.stores) && data.stores.length > 0;
-    const hasLegacy = data && data.mapping && Array.isArray(data.order) && data.order.length > 0;
-    if (hasStores || hasLegacy) {
-      applyStoreMapping(data.order || [], data.mapping || {}, data.stores);
+    if (
+      data &&
+      data.mapping &&
+      Array.isArray(data.order) &&
+      data.order.length > 0
+    ) {
+      applyStoreMapping(data.order, data.mapping);
       // Cache this successful fetch as the fallback for next time
       try {
         localStorage.setItem(
@@ -1242,7 +1160,6 @@ async function loadLiveStoreMapping(): Promise<boolean> {
           JSON.stringify({
             mapping: data.mapping,
             order: data.order,
-            stores: data.stores,
             savedAt: Date.now(),
           })
         );
@@ -1276,16 +1193,6 @@ interface UserAccount {
   name: string;
   scopeType: "all" | "cityManager" | "supervisor" | "teamLeader";
   scopeValue?: string;
-  // Countries this account may see. Absent = all countries (keeps the built-in
-  // UAE accounts working unchanged, since their stores are UAE-only anyway).
-  countries?: string[];
-}
-
-// The countries a user is entitled to (defaults to all when unset).
-function userCountries(user: UserAccount): string[] {
-  return user.countries && user.countries.length
-    ? user.countries.map((c) => normCountry(c))
-    : (COUNTRIES as readonly string[]).slice();
 }
 
 const USERS: UserAccount[] = [
@@ -1704,40 +1611,6 @@ function authenticate(username: string, password: string): UserAccount | null {
   );
   return u || null;
 }
-
-// Log in against the central Users sheet first (so accounts are managed there
-// without redeploys), then fall back to the built-in accounts — which keeps the
-// existing UAE logins working and lets people sign in offline. The backend
-// returns only the matched account's scope, never other users or passwords.
-async function loginAccount(
-  username: string,
-  password: string
-): Promise<UserAccount | null> {
-  try {
-    const url =
-      `${GOOGLE_SCRIPT_URL}?login=1&u=${encodeURIComponent(username.trim())}` +
-      `&p=${encodeURIComponent(password)}`;
-    const r = await fetch(url);
-    const j = await r.json();
-    if (j && j.ok && j.user) {
-      const su = j.user;
-      return {
-        username: su.username || username.trim(),
-        password: "",
-        role: (su.role as Role) || "L1",
-        name: su.name || su.username || username.trim(),
-        scopeType: su.scopeType || "all",
-        scopeValue: su.scopeValue || "",
-        countries: Array.isArray(su.countries)
-          ? su.countries.map((c: string) => normCountry(c))
-          : undefined,
-      };
-    }
-  } catch {
-    /* backend unreachable — fall through to built-in accounts */
-  }
-  return authenticate(username, password);
-}
 // Returns the set of store names a user is allowed to see
 // Normalize names for matching — trims whitespace and lowercases — so sheet
 // typos like "Hamza khan" vs "Hamza Khan " all match the same person/store.
@@ -1747,39 +1620,32 @@ function norm(v?: string): string {
     .toLowerCase();
 }
 
-// Stores a user may see = (role scope) ∩ (their countries). The country filter
-// is applied LAST so it also bounds a "country admin" (scopeType 'all' with a
-// specific countries list) to just their countries.
 function getScopedStores(user: UserAccount): string[] {
-  const cset = new Set(userCountries(user).map(norm));
-  const inCountry = (s: string) => cset.has(norm(storeCountry(s)));
-
-  let byRole: string[];
-  if (user.scopeType === "all") {
-    byRole = STORE_NAMES.slice();
-  } else {
-    const want = norm(user.scopeValue);
-    if (user.scopeType === "cityManager") {
-      byRole = STORE_NAMES.filter((s) => norm(STORE_MAPPING[s].cityManager) === want);
-    } else if (user.scopeType === "supervisor") {
-      byRole = STORE_NAMES.filter((s) => norm(STORE_MAPPING[s].supervisor) === want);
-    } else if (user.scopeType === "teamLeader") {
-      // TL sees ALL stores under their supervisor(s), including sibling TLs.
-      const mySupervisors = Array.from(
-        new Set(
-          STORE_NAMES.filter((s) => norm(STORE_MAPPING[s].tl) === want).map((s) =>
-            norm(STORE_MAPPING[s].supervisor)
-          )
+  if (user.scopeType === "all") return STORE_NAMES;
+  const want = norm(user.scopeValue);
+  if (user.scopeType === "cityManager")
+    return STORE_NAMES.filter(
+      (s) => norm(STORE_MAPPING[s].cityManager) === want
+    );
+  if (user.scopeType === "supervisor")
+    return STORE_NAMES.filter(
+      (s) => norm(STORE_MAPPING[s].supervisor) === want
+    );
+  if (user.scopeType === "teamLeader") {
+    // TL sees ALL stores under their supervisor(s), including sibling TLs.
+    // Find which supervisor(s) this TL reports to, then return all their stores.
+    const mySupervisors = Array.from(
+      new Set(
+        STORE_NAMES.filter((s) => norm(STORE_MAPPING[s].tl) === want).map((s) =>
+          norm(STORE_MAPPING[s].supervisor)
         )
-      );
-      byRole = STORE_NAMES.filter((s) =>
-        mySupervisors.includes(norm(STORE_MAPPING[s].supervisor))
-      );
-    } else {
-      byRole = [];
-    }
+      )
+    );
+    return STORE_NAMES.filter((s) =>
+      mySupervisors.includes(norm(STORE_MAPPING[s].supervisor))
+    );
   }
-  return byRole.filter(inCountry);
+  return [];
 }
 function loadSession(): UserAccount | null {
   try {
@@ -1863,8 +1729,8 @@ function extractHourSlot(val: string) {
   }
   return s;
 }
-function getCurrentHourLabel(country?: string) {
-  const h = nowInCountry(country).getHours();
+function getCurrentHourLabel() {
+  const h = new Date().getHours();
   return `${h % 12 || 12}:00 ${h < 12 ? "AM" : "PM"}`;
 }
 // Convert a slot label like "3:00 PM" / "12:00 PM" to its 24h hour number (0-23).
@@ -1887,13 +1753,10 @@ function getLast7Dates(days = 7) {
   }
   return d;
 }
-// Slots elapsed on a given date. For "today" it's computed in the country's
-// local time (so a store in KSA/Egypt isn't judged against UAE's clock).
-function getElapsedSlots(dateStr: string, country?: string): number {
-  const now = nowInCountry(country);
-  const today = fmtDate(now.toISOString());
+function getElapsedSlots(dateStr: string): number {
+  const today = fmtDate(new Date().toISOString());
   if (dateStr === today) {
-    const nowHour = now.getHours();
+    const nowHour = new Date().getHours();
     if (nowHour < SHIFT_START) return 0;
     if (nowHour >= SHIFT_END) return TOTAL_SHIFT_SLOTS;
     return nowHour - SHIFT_START;
@@ -1902,18 +1765,6 @@ function getElapsedSlots(dateStr: string, country?: string): number {
 }
 function getTotalExpected(dates: string[], stores: number): number {
   return dates.reduce((acc, date) => acc + getElapsedSlots(date) * stores, 0);
-}
-// Country-aware expected slots: each store is judged in ITS country's timezone,
-// so a mixed-country store set sums correctly (a KSA store's "today" elapses on
-// a different clock than a UAE store's).
-function expectedSlots(dates: string[], storeList: string[]): number {
-  let total = 0;
-  for (let i = 0; i < dates.length; i++) {
-    for (let j = 0; j < storeList.length; j++) {
-      total += getElapsedSlots(dates[i], storeCountry(storeList[j]));
-    }
-  }
-  return total;
 }
 function getDayLabel(s: string) {
   try {
@@ -2041,9 +1892,7 @@ async function getServerPresence(
       record.id
     )}&store=${encodeURIComponent(record.store)}&date=${encodeURIComponent(
       record.date
-    )}&slot=${encodeURIComponent(record.hourSlot)}&country=${encodeURIComponent(
-      record.country || DEFAULT_COUNTRY
-    )}`;
+    )}&slot=${encodeURIComponent(record.hourSlot)}`;
     const r = await fetch(u);
     const j = await r.json();
     const present = new Set<number>(
@@ -2129,7 +1978,6 @@ async function sendUnit(record: any, u: UploadUnit) {
     await postJSON({
       action: "addFile",
       recordId: record.id,
-      country: record.country || DEFAULT_COUNTRY,
       store: record.store,
       date: record.date,
       hourSlot: record.hourSlot,
@@ -2143,7 +1991,6 @@ async function sendUnit(record: any, u: UploadUnit) {
     await postJSON({
       action: "addChunk",
       recordId: record.id,
-      country: record.country || DEFAULT_COUNTRY,
       store: record.store,
       date: record.date,
       hourSlot: record.hourSlot,
@@ -2183,7 +2030,6 @@ async function uploadSubmission(record: any, files: any[]): Promise<boolean> {
       await postJSON({
         action: "assembleFile",
         recordId: record.id,
-        country: record.country || DEFAULT_COUNTRY,
         store: record.store,
         date: record.date,
         hourSlot: record.hourSlot,
@@ -2223,11 +2069,7 @@ async function uploadSubmission(record: any, files: any[]): Promise<boolean> {
   for (let vtries = 0; vtries < 3 && !ok; vtries++) {
     await sleep(vtries === 0 ? 4000 : 3500 * (vtries + 1));
     try {
-      const c = await fetch(
-        `${GOOGLE_SCRIPT_URL}?check=${record.id}&country=${encodeURIComponent(
-          record.country || DEFAULT_COUNTRY
-        )}`
-      );
+      const c = await fetch(`${GOOGLE_SCRIPT_URL}?check=${record.id}`);
       const res = await c.json();
       ok = res.found === true;
     } catch {}
@@ -2480,11 +2322,9 @@ function AdBadge({ pct }: { pct: number }) {
 
 // ── UPLOAD VIEW ───────────────────────────────────────────────────────────
 function UploadView() {
-  // Country gates the store list; slots + shift are in the country's local time.
-  const [country, setCountry] = useState<string>(DEFAULT_COUNTRY);
   const [store, setStore] = useState("");
-  const [nowHour, setNowHour] = useState(nowInCountry(DEFAULT_COUNTRY).getHours());
-  const [hourSlot, setHourSlot] = useState(getCurrentHourLabel(DEFAULT_COUNTRY));
+  const [nowHour, setNowHour] = useState(new Date().getHours());
+  const [hourSlot, setHourSlot] = useState(getCurrentHourLabel());
   const [sections, setSections] = useState<Record<SectionId, FileItem[]>>({
     inside: [],
     outside: [],
@@ -2503,41 +2343,19 @@ function UploadView() {
   const ringRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const scheduleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mapping = store ? STORE_MAPPING[store] : null;
-  // Countries that actually have stores (fallback to the full list on first load
-  // before the live store list arrives).
-  const countryOptions = (() => {
-    const set = Array.from(new Set(STORE_ROWS.map((r) => r.country)));
-    return set.length ? set : (COUNTRIES as readonly string[]).slice();
-  })();
-  // Stores in the selected country, honoring the search box.
-  const storesForCountry = STORE_NAMES.filter(
-    (s) =>
-      normCountry(storeCountry(s)) === normCountry(country) &&
-      s.toLowerCase().includes(storeSearch.toLowerCase())
-  );
   // Uploads allowed during slot windows: 8 AM through the 10 PM slot, which
   // stays open until 11 PM (nowHour 8..22 inclusive). At 11 PM (23) it closes.
   const withinShift = nowHour >= SHIFT_START && nowHour < SHIFT_END;
 
   // Keep the current hour fresh — re-check every 30s so the slot rolls over
-  // automatically and uploads lock the moment an hour elapses. Computed in the
-  // selected country's local time.
+  // automatically and uploads lock the moment an hour elapses.
   useEffect(() => {
     const iv = setInterval(() => {
-      setNowHour(nowInCountry(country).getHours());
-      setHourSlot(getCurrentHourLabel(country));
+      setNowHour(new Date().getHours());
+      setHourSlot(getCurrentHourLabel());
     }, 30000);
     return () => clearInterval(iv);
-  }, [country]);
-
-  // On country change, re-stamp the slot immediately and clear the store pick
-  // (its store list no longer applies).
-  useEffect(() => {
-    setNowHour(nowInCountry(country).getHours());
-    setHourSlot(getCurrentHourLabel(country));
-    setStore("");
-    setStoreSearch("");
-  }, [country]);
+  }, []);
 
   // Unlock audio on the first user interaction (mobile browsers require a
   // gesture before any sound can play). After this, hourly alerts will sound.
@@ -2675,17 +2493,15 @@ function UploadView() {
       const cur = prev[sid],
         rem = sec.max - cur.length;
       if (rem <= 0) return prev;
-      const nf = incoming
-        .slice(0, rem)
-        .map((f) => ({
-          id: Math.random().toString(36).slice(2),
-          name: f.name,
-          file: f,
-          type: (f.type.startsWith("video") ? "video" : "image") as
-            | "image"
-            | "video",
-          preview: URL.createObjectURL(f),
-        }));
+      const nf = incoming.slice(0, rem).map((f) => ({
+        id: Math.random().toString(36).slice(2),
+        name: f.name,
+        file: f,
+        type: (f.type.startsWith("video") ? "video" : "image") as
+          | "image"
+          | "video",
+        preview: URL.createObjectURL(f),
+      }));
       return { ...prev, [sid]: [...cur, ...nf] };
     });
   }
@@ -2753,11 +2569,10 @@ function UploadView() {
       alert("Please select a store.");
       return;
     }
-    // Shift window is evaluated in the selected country's local time.
-    const liveHour = nowInCountry(country).getHours();
+    const liveHour = new Date().getHours();
     if (liveHour < SHIFT_START || liveHour >= SHIFT_END) {
       alert(
-        "Uploads are only allowed during shift hours (8 AM–10 PM, local time). This slot has elapsed."
+        "Uploads are only allowed during shift hours (8 AM–10 PM). This slot has elapsed."
       );
       return;
     }
@@ -2766,18 +2581,15 @@ function UploadView() {
       alert("Please upload at least one photo or video.");
       return;
     }
-    // Always stamp with the live current hour (country-local) — never a stale slot
-    const currentSlot = getCurrentHourLabel(country);
-    const todayStr = fmtDate(nowInCountry(country).toISOString());
+    // Always stamp with the live current hour — never a stale/elapsed slot
+    const currentSlot = getCurrentHourLabel();
+    const todayStr = fmtDate(new Date().toISOString());
     // Warn (but allow) if this store+slot was already submitted today. Skipped
     // on retry, since a retry of a failed upload is not a real duplicate.
     if (!isRetry) {
       const already = loadSubmissions().some(
         (s) =>
-          s.store === store &&
-          normCountry((s as any).country) === normCountry(country) &&
-          s.date === todayStr &&
-          s.hourSlot === currentSlot
+          s.store === store && s.date === todayStr && s.hourSlot === currentSlot
       );
       if (already) {
         const proceed = window.confirm(
@@ -2813,9 +2625,8 @@ function UploadView() {
     const record: Submission = {
       id: Date.now().toString() + "-" + Math.random().toString(36).slice(2, 8),
       timestamp: new Date().toISOString(),
-      date: fmtDate(nowInCountry(country).toISOString()),
+      date: fmtDate(new Date().toISOString()),
       hourSlot: currentSlot,
-      country,
       store,
       tl: mapping!.tl,
       supervisor: mapping!.supervisor,
@@ -3259,41 +3070,6 @@ function UploadView() {
               marginBottom: 8,
             }}
           >
-            Country
-          </div>
-          <select
-            value={country}
-            onChange={(e) => setCountry(e.target.value)}
-            style={{
-              width: "100%",
-              background: "#2C2C2E",
-              border: "0.5px solid #3A3A3C",
-              borderRadius: 8,
-              padding: "10px 12px",
-              fontSize: 14,
-              fontWeight: 600,
-              color: "#F5D000",
-              appearance: "none" as const,
-              fontFamily: "inherit",
-              marginBottom: 12,
-            }}
-          >
-            {countryOptions.map((c) => (
-              <option key={c} value={c}>
-                {c}
-              </option>
-            ))}
-          </select>
-          <div
-            style={{
-              fontSize: 10,
-              color: "#777",
-              textTransform: "uppercase" as const,
-              letterSpacing: "0.1em",
-              fontWeight: 600,
-              marginBottom: 8,
-            }}
-          >
             Dark store location
           </div>
           <input
@@ -3335,17 +3111,22 @@ function UploadView() {
             }}
           >
             <option value="">— Select your store —</option>
-            {storesForCountry.map((s) => (
+            {STORE_NAMES.filter((s) =>
+              s.toLowerCase().includes(storeSearch.toLowerCase())
+            ).map((s) => (
               <option key={s} value={s}>
                 {s}
               </option>
             ))}
           </select>
-          {storeSearch && storesForCountry.length === 0 && (
-            <div style={{ fontSize: 11, color: "#FF6B6B", marginTop: 6 }}>
-              No stores match "{storeSearch}" in {country}
-            </div>
-          )}
+          {storeSearch &&
+            STORE_NAMES.filter((s) =>
+              s.toLowerCase().includes(storeSearch.toLowerCase())
+            ).length === 0 && (
+              <div style={{ fontSize: 11, color: "#FF6B6B", marginTop: 6 }}>
+                No stores match "{storeSearch}"
+              </div>
+            )}
           {mapping && (
             <div
               style={{
@@ -3794,12 +3575,6 @@ function DashboardView({
 }) {
   // Scope the visible stores based on the logged-in user's role
   const SCOPED_STORES = getScopedStores(user);
-  // Hard country gate on rows: even if a store name collides across countries,
-  // a user never sees a country they aren't entitled to. Legacy rows with no
-  // Country value read as the default (UAE).
-  const allowedCountrySet = new Set(userCountries(user).map(norm));
-  const rowInScopeCountry = (r: any) =>
-    allowedCountrySet.has(norm(normCountry(r.Country)));
   const canExport = true; // Admin, L1 (CM/Supervisor), L2 (TL) — all can export
   const [sheetData, setSheetData] = useState<SheetRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -3872,11 +3647,12 @@ function DashboardView({
     };
   }, [pullDist]);
 
-  // Fetch ONE country's Current tab (each country can live in its own
-  // spreadsheet). Returns the rows array, or "busy" (quota HTML) / "error".
-  async function fetchOneCountry(
-    ctry: string
-  ): Promise<any[] | "busy" | "error"> {
+  async function fetchSheet(isAutoRefresh = false) {
+    // Up to 3 attempts with backoff. Uses a 25s timeout so a slow/busy server
+    // doesn't hang the dashboard forever. If Apps Script is over its execution
+    // quota it returns an HTML "too many scripts running" page (not JSON) — we
+    // detect that and show a friendly "server busy" message while keeping any
+    // data already on screen, instead of blanking out.
     const delays = [0, 4000, 8000];
     for (let attempt = 0; attempt < delays.length; attempt++) {
       if (delays[attempt])
@@ -3884,79 +3660,55 @@ function DashboardView({
       try {
         const ctrl = new AbortController();
         const timer = setTimeout(() => ctrl.abort(), 25000);
-        const res = await fetch(
-          `${GOOGLE_SCRIPT_URL}?country=${encodeURIComponent(ctry)}`,
-          { signal: ctrl.signal }
-        );
+        const res = await fetch(GOOGLE_SCRIPT_URL, { signal: ctrl.signal });
         clearTimeout(timer);
         const text = await res.text();
+        // Busy / quota page is HTML, not JSON
         if (/too many scripts|<html|<!DOCTYPE/i.test(text)) {
-          if (attempt < delays.length - 1) continue;
-          return "busy";
+          if (attempt < delays.length - 1) continue; // retry after backoff
+          setError(
+            "Server busy (Google quota). Showing last data — retrying shortly."
+          );
+          setLoading(false);
+          return;
         }
+        let raw: any;
         try {
-          const raw = JSON.parse(text);
-          return Array.isArray(raw) ? raw : [];
+          raw = JSON.parse(text);
         } catch {
           if (attempt < delays.length - 1) continue;
-          return "error";
+          setError(
+            "Couldn't read server response. Showing last data — will retry."
+          );
+          setLoading(false);
+          return;
         }
-      } catch {
-        if (attempt < delays.length - 1) continue;
-        return "error";
+        const clean = Array.isArray(raw)
+          ? raw.filter(
+              (r: any) => r.Store && r.Store !== "TEST" && r.Store !== ""
+            )
+          : [];
+        setSheetData(clean);
+        setLastRefresh(
+          new Date().toLocaleTimeString("en-AE", {
+            hour: "2-digit",
+            minute: "2-digit",
+          })
+        );
+        setLoading(false);
+        setError("");
+        return; // success
+      } catch (e: any) {
+        if (attempt < delays.length - 1) continue; // timeout/network — retry
+        // Final failure: keep any existing data on screen, just flag it
+        setError(
+          isAutoRefresh
+            ? "Couldn't refresh (server busy). Showing last data."
+            : "Server busy or unreachable. Pull down to retry."
+        );
+        setLoading(false);
       }
     }
-    return "error";
-  }
-
-  async function fetchSheet(isAutoRefresh = false) {
-    // Fan out across only the countries this user is scoped to, then merge.
-    // A single-country user makes one call (as before); a multi-country user
-    // reads each country's sheet in parallel.
-    const scopedCountries = Array.from(
-      new Set(getScopedStores(user).map(storeCountry))
-    );
-    const countriesToFetch = scopedCountries.length
-      ? scopedCountries
-      : userCountries(user);
-
-    const results = await Promise.all(countriesToFetch.map(fetchOneCountry));
-    const merged: any[] = [];
-    let anyOk = false;
-    let anyBusy = false;
-    results.forEach((r) => {
-      if (Array.isArray(r)) {
-        anyOk = true;
-        for (const row of r) merged.push(row);
-      } else if (r === "busy") anyBusy = true;
-    });
-
-    if (!anyOk) {
-      // Nothing came back — keep whatever's on screen, flag why.
-      setError(
-        anyBusy
-          ? "Server busy (Google quota). Showing last data — retrying shortly."
-          : isAutoRefresh
-          ? "Couldn't refresh (server busy). Showing last data."
-          : "Server busy or unreachable. Pull down to retry."
-      );
-      setLoading(false);
-      return;
-    }
-
-    const clean = merged.filter(
-      (r: any) => r.Store && r.Store !== "TEST" && r.Store !== ""
-    );
-    setSheetData(clean);
-    setLastRefresh(
-      new Date().toLocaleTimeString("en-AE", {
-        hour: "2-digit",
-        minute: "2-digit",
-      })
-    );
-    // Partial success (some countries busy) — show data but note it.
-    setError(anyBusy ? "Some countries still loading (server busy)…" : "");
-    setLoading(false);
   }
 
   // ── CSV / EXCEL EXPORT ──────────────────────────────────────────────────
@@ -4038,10 +3790,7 @@ function DashboardView({
   // only on the user's store count — inflating submitted and shrinking expected.
   const scopedSet = new Set(SCOPED_STORES.map(norm));
   const filtered = sheetData.filter(
-    (r) =>
-      dateSet.has(extractDate(r.Date)) &&
-      scopedSet.has(norm(r.Store)) &&
-      rowInScopeCountry(r)
+    (r) => dateSet.has(extractDate(r.Date)) && scopedSet.has(norm(r.Store))
   );
 
   function calcAdh(rows: SheetRow[], stores: string[]) {
@@ -4054,7 +3803,7 @@ function DashboardView({
       )
     );
     const submitted = uniq.size;
-    const expected = expectedSlots(dates, stores);
+    const expected = getTotalExpected(dates, stores.length);
     // Nothing due yet (e.g. before 8 AM) = compliant, not flagged
     const pct =
       expected === 0
@@ -4073,7 +3822,8 @@ function DashboardView({
     dayRows.forEach((r) =>
       uniqDay.add(r.Store + "|" + extractHourSlot(r.HourSlot))
     );
-    const expectedToday = expectedSlots([date], SCOPED_STORES);
+    const elapsedToday = getElapsedSlots(date);
+    const expectedToday = SCOPED_STORES.length * elapsedToday;
     const pct =
       expectedToday === 0
         ? 100
@@ -4293,7 +4043,7 @@ function DashboardView({
     const r = drillData.filter((x) => extractDate(x.Date) === date);
     const uniq = new Set<string>();
     r.forEach((x) => uniq.add(extractHourSlot(x.HourSlot)));
-    const elapsed = getElapsedSlots(date, storeCountry(drillStore));
+    const elapsed = getElapsedSlots(date);
     const pct =
       elapsed === 0
         ? 100
@@ -5703,15 +5453,8 @@ function LoginView({ onLogin }: { onLogin: (u: UserAccount) => void }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
-  async function submit() {
-    if (busy) return;
-    setBusy(true);
-    setError("");
-    // Validates against the central Users sheet, then falls back to built-in
-    // accounts (existing UAE logins / offline).
-    const u = await loginAccount(username, password);
-    setBusy(false);
+  function submit() {
+    const u = authenticate(username, password);
     if (u) {
       setError("");
       onLogin(u);

@@ -1,98 +1,10 @@
-// Default spreadsheet + Drive root = the ORIGINAL UAE store. UAE keeps using
-// these, so all existing UAE data, tabs, and files stay exactly where they are.
 const SHEET_ID = "1sqj5OIJP1whQ20YVWXZqONtOKexaGI6yOxKthSC4ymk";
+
 const ROOT_FOLDER_ID = "1q8BB_ZCUbTcoHCaK-O36_N50AH3jsPfE";
 
 // Live store list + POC mapping source (separate spreadsheet, Sheet1).
-// Columns: Country | Store | TL | Supervisor | AM | City Manager
-// This stays CENTRAL (one place to manage stores + the Users tab) regardless of
-// how many countries have their own data spreadsheet.
+// Columns: Store | TL | Supervisor | AM | City Manager
 const STORE_LIST_SHEET_ID = "192-ZhllfZyNJHMUqjbjseKxGcM0Eb14hKvuSO7dfunk";
-
-// ── PER-COUNTRY DATA LOCATION ─────────────────────────────────────────────
-// Each country's SUBMISSION DATA (spreadsheet) and FILES (Drive root) can live
-// in their own place. UAE points at the defaults above. For any other country
-// the location is resolved in this order:
-//   1. an explicit entry in COUNTRY_CONFIG below (paste IDs to control exactly
-//      where a country lives / who owns it), else
-//   2. IDs remembered in Script Properties from a previous auto-create, else
-//   3. auto-created on first use (a new spreadsheet + Drive folder), and the new
-//      IDs are saved to Script Properties so they're reused forever.
-// Fully backward compatible: unknown/blank country falls back to the defaults.
-const COUNTRY_CONFIG = {
-  UAE: { sheetId: SHEET_ID, rootFolderId: ROOT_FOLDER_ID },
-  // KSA:   { sheetId: "…", rootFolderId: "…" },   // ← paste to pin manually
-  // Egypt: { sheetId: "…", rootFolderId: "…" },
-};
-
-// Resolve (and lazily provision) a country's { sheetId, rootFolderId }.
-function configForCountry(country) {
-  const c = normCountry(country);
-  if (COUNTRY_CONFIG[c] && COUNTRY_CONFIG[c].sheetId && COUNTRY_CONFIG[c].rootFolderId) {
-    return COUNTRY_CONFIG[c];
-  }
-  const props = PropertiesService.getScriptProperties();
-  let sheetId = props.getProperty("country_sheet_" + c);
-  let rootId = props.getProperty("country_root_" + c);
-  if (sheetId && rootId) return { sheetId: sheetId, rootFolderId: rootId };
-
-  // Auto-create — guarded so concurrent first-writes don't make duplicates.
-  const lock = LockService.getScriptLock();
-  try { lock.waitLock(20000); } catch (e) {}
-  try {
-    sheetId = props.getProperty("country_sheet_" + c);
-    rootId = props.getProperty("country_root_" + c);
-    if (sheetId && rootId) return { sheetId: sheetId, rootFolderId: rootId };
-    const newSheetId = SpreadsheetApp.create("DarkStore Data — " + c).getId();
-    const newRootId = DriveApp.createFolder("DarkStore Files — " + c).getId();
-    props.setProperty("country_sheet_" + c, newSheetId);
-    props.setProperty("country_root_" + c, newRootId);
-    return { sheetId: newSheetId, rootFolderId: newRootId };
-  } catch (e) {
-    // If provisioning fails, fall back to the default store so nothing is lost.
-    return { sheetId: SHEET_ID, rootFolderId: ROOT_FOLDER_ID };
-  } finally {
-    try { lock.releaseLock(); } catch (e) {}
-  }
-}
-function sheetIdFor(country) { return configForCountry(country).sheetId; }
-function rootFolderIdFor(country) { return configForCountry(country).rootFolderId; }
-function ssFor(country) { return SpreadsheetApp.openById(sheetIdFor(country)); }
-
-// Every country that has (or should have) its own data: the supported list plus
-// any that were auto-created. Used by the daily maintenance loops.
-function knownCountries() {
-  const set = {};
-  COUNTRIES.forEach(function (c) { set[c] = true; });
-  Object.keys(COUNTRY_CONFIG).forEach(function (c) { set[normCountry(c)] = true; });
-  const props = PropertiesService.getScriptProperties().getProperties();
-  Object.keys(props).forEach(function (k) {
-    if (k.indexOf("country_sheet_") === 0) set[k.substring("country_sheet_".length)] = true;
-  });
-  return Object.keys(set);
-}
-
-// Central user-account tab (in the store-list spreadsheet). Tab name "Users",
-// columns: Username | Password | Role | Name | ScopeType | ScopeValue | Countries
-// Countries is a comma-separated list ("UAE,KSA") or "ALL".
-const USERS_TAB_NAME = "Users";
-
-// ── COUNTRIES ─────────────────────────────────────────────────────────────
-// Supported countries. UAE is the default for any legacy row/folder/account
-// that predates multi-country support, so everything stays backward compatible.
-const DEFAULT_COUNTRY = "UAE";
-const COUNTRIES = ["UAE", "KSA", "Egypt", "Bahrain", "Qatar", "Kuwait"];
-const COUNTRY_SET = COUNTRIES.reduce(function (m, c) { m[c] = true; return m; }, {});
-
-// Normalize an incoming country value to a supported one; default to UAE.
-function normCountry(v) {
-  const s = String(v || "").trim();
-  if (!s) return DEFAULT_COUNTRY;
-  for (let i = 0; i < COUNTRIES.length; i++) {
-    if (COUNTRIES[i].toLowerCase() === s.toLowerCase()) return COUNTRIES[i];
-  }
-  return s; // unknown but non-empty — keep as-is so nothing is silently dropped
-}
 
 // Get-or-create a child folder. FAST PATH is lock-free (folder already exists),
 // which is the case for all but the very first request of each hour. We only
@@ -115,11 +27,8 @@ function getOrCreateFolder(parent, name) {
   }
 }
 
-// Each country has its OWN Drive root (resolved per country), so the layout
-// inside a root is simply Store / Date / Hour. For UAE the root is the original
-// ROOT_FOLDER_ID, so existing UAE files keep their exact paths.
-function getHourFolder(country, store, date, hourSlot) {
-  const root = DriveApp.getFolderById(rootFolderIdFor(country));
+function getHourFolder(store, date, hourSlot) {
+  const root = DriveApp.getFolderById(ROOT_FOLDER_ID);
   const storeFolder = getOrCreateFolder(root, store);
   const dateFolder = getOrCreateFolder(storeFolder, date);
   const hourLabel = String(hourSlot).replace(":", "-");
@@ -152,13 +61,6 @@ function ensureWeekHeader(sheet) {
   if (String(cell.getValue()).trim() !== "Week") cell.setValue("Week");
 }
 
-// Make sure the "Country" header exists in column 17, once. Country was added
-// after launch, so legacy rows simply have a blank column 17 (read as UAE).
-function ensureCountryHeader(sheet) {
-  const cell = sheet.getRange(1, 17);
-  if (String(cell.getValue()).trim() !== "Country") cell.setValue("Country");
-}
-
 // ── ROLLING CURRENT + IMMUTABLE WEEKLY TABS ───────────────────────────────
 // The app reads and writes only the "Current" tab, which is kept small (the
 // last CURRENT_DAYS). A daily job MOVES rows older than CURRENT_DAYS out of
@@ -169,7 +71,7 @@ function ensureCountryHeader(sheet) {
 const CURRENT_DAYS = 10;
 const SHEET_HEADERS = [
   "ID","Timestamp","Date","HourSlot","Store","TL","Supervisor","AM","CityManager",
-  "Inside_Count","Outside_Count","Parking_Count","TotalFiles","DriveLink","FileLinks","Week","Country"
+  "Inside_Count","Outside_Count","Parking_Count","TotalFiles","DriveLink","FileLinks","Week"
 ];
 
 // True for a weekly-archive tab name like "2026-W07".
@@ -177,10 +79,9 @@ function isWeekTabName(name) {
   return /^\d{4}-W\d{2}$/.test(String(name).trim());
 }
 
-// The tab the app reads from and new rows are written to, in the given country's
-// spreadsheet. Created on demand. Country defaults to UAE (the original sheet).
-function getCurrentSheet(country) {
-  const ss = ssFor(country);
+// The tab the app reads from and new rows are written to. Created on demand.
+function getCurrentSheet() {
+  const ss = SpreadsheetApp.openById(SHEET_ID);
   let cur = ss.getSheetByName("Current");
   if (!cur) {
     cur = ss.insertSheet("Current", 0); // first tab
@@ -191,10 +92,10 @@ function getCurrentSheet(country) {
 }
 
 // Get-or-create the immutable weekly tab for a label like "2026-W27" (or the
-// "Undated" catch-all) in the given country's spreadsheet. New tabs get the
-// header row + a frozen header. NEVER clears existing data — append-only.
-function getWeekSheet(country, label) {
-  const ss = ssFor(country);
+// "Undated" catch-all). New tabs get the header row + a frozen header. This
+// NEVER clears or rewrites existing data — weekly tabs are append-only.
+function getWeekSheet(label) {
+  const ss = SpreadsheetApp.openById(SHEET_ID);
   let sh = ss.getSheetByName(label);
   if (sh) return sh;
   sh = ss.insertSheet(label);
@@ -224,7 +125,7 @@ function rowDate_(row, dateIdx, tsIdx) {
 // in original row order minus exactly the rows moved this run. Idempotent: rows
 // whose ID already exists in the target week tab are not re-appended, so a
 // partial run that failed before rewriting Current can't create duplicates.
-function rollCurrentToWeeklyTabs(country) {
+function rollCurrentToWeeklyTabs() {
   const ROLL_WEEKS_PER_RUN = 8;
   const MAX_MS = 3 * 60 * 1000; // leave headroom for the file purge in the same execution
   const startTime = Date.now();
@@ -232,8 +133,8 @@ function rollCurrentToWeeklyTabs(country) {
   const lock = LockService.getScriptLock();
   try { lock.waitLock(10000); } catch (e) { return false; } // busy — try next cycle
   try {
-    const ss = ssFor(country);
-    const cur = ss.getSheetByName("Current") || getCurrentSheet(country);
+    const ss = SpreadsheetApp.openById(SHEET_ID);
+    const cur = ss.getSheetByName("Current") || getCurrentSheet();
     if (cur.getLastRow() < 2) return false;
     const values = cur.getDataRange().getValues();
     const headers = values[0];
@@ -484,7 +385,7 @@ function doPost(e) {
 
     // ── ACTION: logFailed ────────────────────────────────────────────────
     if (data.action === "logFailed") {
-      const ss = ssFor(data.country);
+      const ss = SpreadsheetApp.openById(SHEET_ID);
       let failSheet = ss.getSheetByName("Failed Uploads");
       if (!failSheet) {
         failSheet = ss.insertSheet("Failed Uploads");
@@ -509,7 +410,7 @@ function doPost(e) {
     // recordId+index prefix already exists, it is skipped. This makes retries
     // safe and means no single request is ever large enough to time out.
     if (data.action === "addFile") {
-      const hourFolder = getHourFolder(data.country, data.store, data.date, data.hourSlot);
+      const hourFolder = getHourFolder(data.store, data.date, data.hourSlot);
       const prefix = data.recordId + "__" + data.index + "__";
       const safeName = prefix + (data.fileName || "file");
       // Idempotent retry: skip if this exact file already exists. Look it up by
@@ -530,7 +431,7 @@ function doPost(e) {
     // Idempotent: a chunk that already exists is skipped. Keeps every request
     // tiny so uploads never fail on large files.
     if (data.action === "addChunk") {
-      const hourFolder = getHourFolder(data.country, data.store, data.date, data.hourSlot);
+      const hourFolder = getHourFolder(data.store, data.date, data.hourSlot);
       const tmp = getTmpFolder(hourFolder);
       const chunkName = data.recordId + "__f" + data.fileIndex + "__c" + data.chunkIndex;
       const existing = tmp.getFilesByName(chunkName);
@@ -546,7 +447,7 @@ function doPost(e) {
     // the temp chunks. Idempotent: if the real file already exists, it returns
     // success. If a chunk is missing, returns success:false so the app resends.
     if (data.action === "assembleFile") {
-      const hourFolder = getHourFolder(data.country, data.store, data.date, data.hourSlot);
+      const hourFolder = getHourFolder(data.store, data.date, data.hourSlot);
       const realPrefix = data.recordId + "__" + data.fileIndex + "__";
       // Already assembled?
       const check = hourFolder.getFiles();
@@ -586,7 +487,7 @@ function doPost(e) {
     // with this ID already exists, it is not duplicated. Gathers this record's
     // file links from the folder.
     if (data.action === "finalize") {
-      const sheet = getCurrentSheet(data.country);
+      const sheet = getCurrentSheet();
       ensureWeekHeader(sheet);
       // NOTE: filing old rows into weekly tabs is NOT done here — doing it on
       // every submission acquired a global lock + rewrote the whole sheet, which
@@ -607,7 +508,7 @@ function doPost(e) {
           }
         }
       }
-      const hourFolder = getHourFolder(data.country, data.store, data.date, data.hourSlot);
+      const hourFolder = getHourFolder(data.store, data.date, data.hourSlot);
       // Collect this record's file links
       const links = [];
       const recPrefix = data.id + "__";
@@ -618,7 +519,6 @@ function doPost(e) {
       }
       const sections = typeof data.sections === "string" ? JSON.parse(data.sections) : (data.sections || {});
       ensureWeekHeader(sheet);
-      ensureCountryHeader(sheet);
       sheet.appendRow([
         data.id, data.timestamp, data.date, data.hourSlot, data.store,
         data.tl, data.supervisor, data.am, data.cityManager,
@@ -628,15 +528,14 @@ function doPost(e) {
         data.totalFiles,
         hourFolder.getUrl(),
         links.join(", "),
-        isoWeek(data.date || data.timestamp),
-        normCountry(data.country)
+        isoWeek(data.date || data.timestamp)
       ]);
       return ContentService.createTextOutput(JSON.stringify({ success: true })).setMimeType(ContentService.MimeType.JSON);
     }
 
     // ── LEGACY: single-payload submission (kept as fallback) ─────────────
-    const sheet = getCurrentSheet(data.country);
-    const hourFolder = getHourFolder(data.country, data.store, data.date, data.hourSlot);
+    const sheet = getCurrentSheet();
+    const hourFolder = getHourFolder(data.store, data.date, data.hourSlot);
     const driveLinks = [];
     const files = typeof data.files === "string" ? JSON.parse(data.files) : (data.files || []);
     files.forEach(f => {
@@ -649,13 +548,12 @@ function doPost(e) {
     });
     const sections = typeof data.sections === "string" ? JSON.parse(data.sections) : (data.sections || {});
     ensureWeekHeader(sheet);
-    ensureCountryHeader(sheet);
     sheet.appendRow([
       data.id, data.timestamp, data.date, data.hourSlot, data.store,
       data.tl, data.supervisor, data.am, data.cityManager,
       (sections.inside || []).length, (sections.outside || []).length, (sections.parking || []).length,
       data.totalFiles, hourFolder.getUrl(), driveLinks.join(", "),
-      isoWeek(data.date || data.timestamp), normCountry(data.country)
+      isoWeek(data.date || data.timestamp)
     ]);
     return ContentService.createTextOutput(JSON.stringify({ success: true })).setMimeType(ContentService.MimeType.JSON);
 
@@ -669,14 +567,14 @@ function doPost(e) {
 // store-list sheet. Cached 10 min in CacheService to keep responses fast.
 function getStoreMappingJSON() {
   const cache = CacheService.getScriptCache();
-  const cached = cache.get("store_mapping_v2");
+  const cached = cache.get("store_mapping_v1");
   if (cached) return cached;
 
   const ss = SpreadsheetApp.openById(STORE_LIST_SHEET_ID);
   // Use Sheet1 explicitly; fall back to the first sheet if not found
   const sheet = ss.getSheetByName("Sheet1") || ss.getSheets()[0];
   const data = sheet.getDataRange().getValues();
-  if (data.length < 2) return JSON.stringify({ mapping: {}, order: [], stores: [] });
+  if (data.length < 2) return JSON.stringify({ mapping: {}, order: [] });
 
   // Locate columns by header so the layout can shift without breaking
   const headers = data[0].map(h => String(h).trim().toLowerCase());
@@ -684,106 +582,37 @@ function getStoreMappingJSON() {
     for (const n of names) { const i = headers.indexOf(n); if (i !== -1) return i; }
     return -1;
   };
-  const cCountry = col(["country", "countries", "market", "geo"]);
   const cStore = col(["store", "stores", "store name", "dark store", "darkstore", "location", "site"]);
   const cTL    = col(["tl", "tls", "team leader", "teamleader", "team lead"]);
   const cSup   = col(["supervisor", "supervisors", "sup"]);
   const cAM    = col(["am", "ams", "assistant manager", "asst manager", "asst. manager", "area manager"]);
   const cCM    = col(["city manager", "citymanager", "city managers", "manager", "cm"]);
 
-  // stores[] is the collision-safe source of truth: each store carries its own
-  // country, so the same store name can exist in two countries without merging.
-  // mapping/order are kept for backward compatibility (keyed by store name;
-  // last row wins on a name collision — new clients should use stores[]).
-  const stores = [];
   const mapping = {};
   const order = [];
   for (let i = 1; i < data.length; i++) {
     const row = data[i];
     const store = cStore === -1 ? "" : String(row[cStore]).trim();
     if (!store) continue; // skip blank rows
-    const rec = {
-      country:     cCountry === -1 ? DEFAULT_COUNTRY : normCountry(row[cCountry]),
-      store:       store,
+    mapping[store] = {
       tl:          cTL  === -1 ? "" : String(row[cTL]).trim(),
       supervisor:  cSup === -1 ? "" : String(row[cSup]).trim(),
       am:          cAM  === -1 ? "" : String(row[cAM]).trim(),
       cityManager: cCM  === -1 ? "" : String(row[cCM]).trim(),
     };
-    stores.push(rec);
-    mapping[store] = { tl: rec.tl, supervisor: rec.supervisor, am: rec.am, cityManager: rec.cityManager };
     order.push(store);
   }
 
-  const json = JSON.stringify({ mapping: mapping, order: order, stores: stores, count: stores.length });
+  const json = JSON.stringify({ mapping: mapping, order: order, count: order.length });
   // Only cache a GOOD result — never poison the cache with an empty/failed read
-  if (stores.length > 0) cache.put("store_mapping_v2", json, 600);
+  if (order.length > 0) cache.put("store_mapping_v1", json, 600);
   return json;
 }
 
-// Run from the editor to clear the store cache immediately (e.g. right after you
-// add stores to the sheet and want them live now instead of waiting 10 min).
+// Run from the editor to clear the 10-min store cache immediately (e.g. right
+// after you add stores to the sheet and want them live now instead of waiting).
 function clearStoreCache() {
-  CacheService.getScriptCache().remove("store_mapping_v2");
   CacheService.getScriptCache().remove("store_mapping_v1");
-}
-
-// Validate a login against the central Users tab. Returns the matched account's
-// scope only (never the password or other accounts). Returns {ok:false} on any
-// miss or if the Users tab doesn't exist yet — the app then falls back to its
-// built-in accounts, so existing UAE logins keep working during rollout.
-function loginUser_(username, password) {
-  const u = String(username || "").trim().toLowerCase();
-  const p = String(password || "");
-  if (!u) return { ok: false };
-  let sheet;
-  try {
-    const ss = SpreadsheetApp.openById(STORE_LIST_SHEET_ID);
-    sheet = ss.getSheetByName(USERS_TAB_NAME);
-  } catch (e) { return { ok: false, reason: "users-unavailable" }; }
-  if (!sheet) return { ok: false, reason: "no-users-tab" };
-
-  const data = sheet.getDataRange().getValues();
-  if (data.length < 2) return { ok: false, reason: "no-users" };
-  const headers = data[0].map(function (h) { return String(h).trim().toLowerCase(); });
-  const col = function (names) {
-    for (let i = 0; i < names.length; i++) { const j = headers.indexOf(names[i]); if (j !== -1) return j; }
-    return -1;
-  };
-  const cUser  = col(["username", "user", "login"]);
-  const cPass  = col(["password", "pass", "pwd"]);
-  const cRole  = col(["role"]);
-  const cName  = col(["name", "display name", "fullname"]);
-  const cSType = col(["scopetype", "scope type", "scope"]);
-  const cSVal  = col(["scopevalue", "scope value", "scopename"]);
-  const cCtry  = col(["countries", "country"]);
-  if (cUser === -1 || cPass === -1) return { ok: false, reason: "bad-users-schema" };
-
-  for (let i = 1; i < data.length; i++) {
-    const row = data[i];
-    if (String(row[cUser]).trim().toLowerCase() !== u) continue;
-    if (String(row[cPass]) !== p) return { ok: false }; // wrong password
-    // Parse countries: "ALL" (or blank) => every supported country.
-    let countries;
-    const raw = cCtry === -1 ? "" : String(row[cCtry]).trim();
-    if (!raw || raw.toUpperCase() === "ALL") {
-      countries = COUNTRIES.slice();
-    } else {
-      countries = raw.split(",").map(function (x) { return normCountry(x); }).filter(function (x) { return x; });
-    }
-    return {
-      ok: true,
-      user: {
-        username:  String(row[cUser]).trim(),
-        name:      cName  === -1 ? String(row[cUser]).trim() : String(row[cName]).trim(),
-        role:      cRole  === -1 ? "L1" : String(row[cRole]).trim(),
-        scopeType: cSType === -1 ? "all" : String(row[cSType]).trim(),
-        scopeValue:cSVal  === -1 ? "" : String(row[cSVal]).trim(),
-        countries: countries
-      }
-    };
-  }
-  return { ok: false }; // no such username
 }
 
 function doGet(e) {
@@ -797,19 +626,8 @@ function doGet(e) {
       .setMimeType(ContentService.MimeType.JSON);
   }
 
-  // ── LOGIN: ?login=1&u=<username>&p=<password> ────────────────────────────
-  // Validates credentials against the central "Users" tab and returns ONLY the
-  // matched account's scope — never the password, never the list of other users.
-  // This is deliberately server-side so a public URL can't dump all credentials.
-  if (e && e.parameter && e.parameter.login !== undefined) {
-    return ContentService.createTextOutput(JSON.stringify(loginUser_(e.parameter.u, e.parameter.p)))
-      .setMimeType(ContentService.MimeType.JSON);
-  }
-
-  // Reads/verifies come from the small, fast "Current" tab of the requested
-  // country's spreadsheet (?country=…, defaults to UAE). The dashboard fetches
-  // each country it needs and merges them client-side.
-  const sheet = getCurrentSheet(e && e.parameter ? e.parameter.country : undefined);
+  // Reads/verifies come from the small, fast "Current" tab (last ~15 days).
+  const sheet = getCurrentSheet();
 
   // ── FILE COUNT: ?fileCount=ID&store=X&date=Y&slot=Z ──────────────────
   // Returns how many files for this record are saved in its folder so the
@@ -817,7 +635,7 @@ function doGet(e) {
   if (e && e.parameter && e.parameter.fileCount) {
     const recId = String(e.parameter.fileCount);
     try {
-      const hourFolder = getHourFolder(e.parameter.country, e.parameter.store, e.parameter.date, e.parameter.slot);
+      const hourFolder = getHourFolder(e.parameter.store, e.parameter.date, e.parameter.slot);
       const prefix = recId + "__";
       // Also return WHICH file indices are present (parsed from names shaped
       // "<recordId>__<index>__..."), so the app can resend only the missing
@@ -884,11 +702,15 @@ function doGet(e) {
 }
 
 function purgeOldFiles() {
-  // Daily maintenance across EVERY country: for each one, roll its Current tab
-  // into weekly tabs, then purge its own Drive root, then log to its own sheet.
-  // A single shared time budget spans all countries; if we run out, the catch-up
-  // trigger resumes and the next pass continues where this left off.
+  // Daily maintenance also files rows older than CURRENT_DAYS from Current into
+  // their immutable weekly tabs here (moved off the per-submission path to
+  // avoid lock contention at busy hours). The roll is batched and returns true
+  // when aged rows still remain, so we resume it via the catch-up trigger below.
+  let rollMore = false;
+  try { rollMore = rollCurrentToWeeklyTabs(); } catch (e) {}
+
   const RETENTION_DAYS = 10;
+  const rootFolder = DriveApp.getFolderById(ROOT_FOLDER_ID);
   const now = new Date();
   const startTime = Date.now();
   const MAX_MS = 5 * 60 * 1000; // stop ~1 min before Apps Script's 6-min limit
@@ -906,21 +728,26 @@ function purgeOldFiles() {
     return folder.getDateCreated();
   }
 
-  let totalDeleted = 0, totalFreedMB = 0, stoppedEarly = false, rollMore = false;
+  let totalDeleted = 0, totalFreedMB = 0, stoppedEarly = false;
 
-  // Purge past-retention files under ONE store folder (Store/Date/Hour/files).
-  // Returns true if it hit the time budget and the caller should stop.
-  function purgeStoreFolder(storeFolder) {
+  const storeFolders = rootFolder.getFolders();
+  outer:
+  while (storeFolders.hasNext()) {
+    const storeFolder = storeFolders.next();
     const dateFolders = storeFolder.getFolders();
     while (dateFolders.hasNext()) {
-      if (Date.now() - startTime > MAX_MS) return true;
+      if (Date.now() - startTime > MAX_MS) { stoppedEarly = true; break outer; }
       const dateFolder = dateFolders.next();
       const d = folderDate(dateFolder);
       if (d >= cutoff) continue; // still within retention window — keep
 
+      // FILES LIVE INSIDE HOUR SUBFOLDERS: Store -> Date -> HourSlot -> files
+      // (The old code looked in the Date folder directly and found nothing,
+      //  which is why every purge logged "Nothing to delete".)
       const hourFolders = dateFolder.getFolders();
       while (hourFolders.hasNext()) {
         const hourFolder = hourFolders.next();
+        // 1) delete the real files in the hour folder
         const files = hourFolder.getFiles();
         while (files.hasNext()) {
           const f = files.next();
@@ -928,7 +755,8 @@ function purgeOldFiles() {
           f.setTrashed(true);
           totalDeleted++;
         }
-        const subs = hourFolder.getFolders(); // leftover _tmp chunk folders
+        // 2) clean any leftover _tmp chunk folders (abandoned chunked uploads)
+        const subs = hourFolder.getFolders();
         while (subs.hasNext()) {
           const sub = subs.next();
           const sf = sub.getFiles();
@@ -940,55 +768,34 @@ function purgeOldFiles() {
           }
         }
       }
-      // NOTE: we NEVER delete folders — they stay as a permanent audit trail.
+      // NOTE: we NEVER delete folders — they stay as a permanent audit trail
+      // of when each store submitted. Only the files inside are purged.
     }
-    return false;
   }
 
-  const countries = knownCountries();
-  for (let ci = 0; ci < countries.length; ci++) {
-    if (Date.now() - startTime > MAX_MS) { stoppedEarly = true; break; }
-    const c = countries[ci];
-
-    // 1) roll this country's Current -> its weekly tabs (batched/resumable).
-    try { if (rollCurrentToWeeklyTabs(c)) rollMore = true; } catch (e) {}
-    if (Date.now() - startTime > MAX_MS) { stoppedEarly = true; break; }
-
-    // 2) purge this country's own Drive root (Store/Date/Hour).
-    const beforeDeleted = totalDeleted, beforeFreed = totalFreedMB;
-    let root;
-    try { root = DriveApp.getFolderById(rootFolderIdFor(c)); } catch (e) { continue; }
-    const storeFolders = root.getFolders();
-    while (storeFolders.hasNext()) {
-      if (purgeStoreFolder(storeFolders.next())) { stoppedEarly = true; break; }
-    }
-
-    // 3) log this country's result to its own spreadsheet.
-    try {
-      const ss = ssFor(c);
-      let purgeLog = ss.getSheetByName("Purge Log");
-      if (!purgeLog) {
-        purgeLog = ss.insertSheet("Purge Log");
-        purgeLog.appendRow(["Timestamp","Files Deleted","Space Freed (MB)","Cutoff Date","Note"]);
-      }
-      const cDeleted = totalDeleted - beforeDeleted;
-      const cFreed = totalFreedMB - beforeFreed;
-      purgeLog.appendRow([
-        new Date().toISOString(), cDeleted, cFreed.toFixed(2), cutoff.toUTCString(),
-        stoppedEarly
-          ? `Deleted ${cDeleted} files in ${c}; stopped early (time limit) — auto-resuming in ~2 min`
-          : (cDeleted > 0
-              ? `Deleted ${cDeleted} files older than ${RETENTION_DAYS} days in ${c}`
-              : "Nothing to delete")
-      ]);
-    } catch (e) {}
-
-    if (stoppedEarly) break;
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  let purgeLog = ss.getSheetByName("Purge Log");
+  if (!purgeLog) {
+    purgeLog = ss.insertSheet("Purge Log");
+    purgeLog.appendRow(["Timestamp","Files Deleted","Space Freed (MB)","Cutoff Date","Note"]);
   }
+  purgeLog.appendRow([
+    new Date().toISOString(),
+    totalDeleted,
+    totalFreedMB.toFixed(2),
+    cutoff.toUTCString(),
+    stoppedEarly
+      ? `Deleted ${totalDeleted} files; stopped early (time limit) — auto-resuming in ~2 min`
+      : (totalDeleted > 0
+          ? `Deleted ${totalDeleted} files older than ${RETENTION_DAYS} days`
+          : "Nothing to delete")
+  ]);
 
   // ── SELF-RESCHEDULE ───────────────────────────────────────────────────
-  // If any country's purge OR roll still has backlog, schedule a one-time
-  // trigger to resume in ~2 minutes; otherwise clear pending catch-ups.
+  // If the file purge OR the weekly roll still has backlog, schedule a one-time
+  // trigger to resume in ~2 minutes. When both finish clean, remove any leftover
+  // catch-up triggers. This lets a large backlog (files AND the first big roll)
+  // chew through on its own, then settle back into the normal nightly schedule.
   if (stoppedEarly || rollMore) {
     ensureCatchUpTrigger();
   } else {
@@ -1018,31 +825,6 @@ function clearCatchUpTriggers() {
 function purgeCatchUp() {
   clearCatchUpTriggers();
   purgeOldFiles();
-}
-
-// ── ONE-TIME: INSTALL THE DAILY MAINTENANCE TRIGGER ───────────────────────
-// Run this ONCE from the editor. It guarantees a daily time-based trigger on
-// purgeOldFiles exists (which drives BOTH the 10-day file purge AND the weekly
-// roll). Idempotent: if a daily purgeOldFiles trigger already exists it does
-// nothing, so it is always safe to run. Use this instead of adding the trigger
-// by hand — it can't be misconfigured, and re-running it after the trigger was
-// disabled/removed simply recreates it.
-//
-// NOTE: a Purge Log row is written on EVERY purgeOldFiles run, so if that tab
-// stops updating it means the trigger stopped firing — run this again and check
-// the Executions panel for any failed runs.
-function ensureDailyMaintenanceTrigger() {
-  const existing = ScriptApp.getProjectTriggers().filter(function (t) {
-    return t.getHandlerFunction() === "purgeOldFiles" &&
-           t.getEventType() === ScriptApp.EventType.CLOCK;
-  });
-  if (existing.length > 0) {
-    Logger.log("Daily maintenance trigger already installed (" + existing.length + "). Nothing to do.");
-    return;
-  }
-  ScriptApp.newTrigger("purgeOldFiles").timeBased().atHour(3).everyDays(1).create();
-  Logger.log("Installed daily maintenance trigger: purgeOldFiles runs every day ~03:00 " +
-    "(drives the file purge AND the weekly roll).");
 }
 
 function testSheet() {
