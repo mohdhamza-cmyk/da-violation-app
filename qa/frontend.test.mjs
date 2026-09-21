@@ -19,14 +19,14 @@ const grabConst = (name) => {
 
 let code = [
   "norm","extractDate","extractHourSlot","slotLabelToHour","slotKey",
-  "isRealRow","rowsFromCompact","cacheCutoffMs","withinCacheWindow",
+  "isRealRow","ensureRowKey","rowsFromCompact","cacheCutoffMs","withinCacheWindow",
 ].map(grab).join("\n");
 code = [grabConst("CACHE_WINDOW_DAYS")].join("\n") + "\n" + code;
 const js = strip(code);
 
 const ctx = {};
-new Function("ctx", js + "\nObject.assign(ctx,{norm,extractDate,extractHourSlot,slotLabelToHour,slotKey,isRealRow,rowsFromCompact,cacheCutoffMs,withinCacheWindow});")(ctx);
-const { slotKey, isRealRow, rowsFromCompact, cacheCutoffMs, withinCacheWindow } = ctx;
+new Function("ctx", js + "\nObject.assign(ctx,{norm,extractDate,extractHourSlot,slotLabelToHour,slotKey,isRealRow,ensureRowKey,rowsFromCompact,cacheCutoffMs,withinCacheWindow});")(ctx);
+const { slotKey, isRealRow, ensureRowKey, rowsFromCompact, cacheCutoffMs, withinCacheWindow } = ctx;
 
 let P=0,F=0; const ok=(c,l)=>{c?(P++,console.log("  ✓ "+l)):(F++,console.log("  ✗ FAIL: "+l));};
 const MON=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
@@ -77,11 +77,27 @@ console.log("\n[C2] compact wire format expands to row objects");
   ok(rowsFromCompact(headers,[]).length===0,"empty delta ⇒ no rows");
 }
 
+console.log("\n[REGRESSION] rows with a blank ID must NOT disappear");
+{
+  const noId = { ID: "", Store: "Deira", Date: dayStr(5), HourSlot: "9:00 AM" };
+  ok(isRealRow(noId) === true, "a blank-ID row is kept (old dashboard kept it; requiring ID hid L7/L10 rows)");
+  const keyed = ensureRowKey({ ...noId });
+  ok(keyed.ID && String(keyed.ID).startsWith("syn-"), "blank ID gets a synthetic key so it can be cached");
+  const again = ensureRowKey({ ...noId });
+  ok(keyed.ID === again.ID, "the synthetic key is STABLE across syncs (no duplicates)");
+  const other = ensureRowKey({ ID: "", Store: "Deira", Date: dayStr(5), HourSlot: "10:00 AM" });
+  ok(other.ID !== keyed.ID, "a different slot gets a different key");
+  const headers = ["ID","Store","Date","HourSlot"];
+  const expanded = rowsFromCompact(headers, [["", "Deira", dayStr(6), "9:00 AM"]]);
+  ok(expanded[0].ID && String(expanded[0].ID).startsWith("syn-"),
+     "rows arriving from the wire are keyed automatically");
+}
+
 console.log("\n[C1] cache hygiene: junk and out-of-window rows are dropped");
 {
   ok(isRealRow(row({}))===true,"a real row is kept");
   ok(isRealRow(row({Store:"TEST"}))===false,"TEST rows rejected");
-  ok(isRealRow({ID:"",Store:"Deira"})===false,"row without an ID rejected");
+  ok(isRealRow({ID:"",Store:"Deira"})===true,"row WITHOUT an ID is kept (matches the original dashboard)");
   ok(isRealRow(null)===false,"null rejected");
   const cut=cacheCutoffMs();
   ok(withinCacheWindow(row({Date:dayStr(0)}),cut)===true,"today is inside the window");

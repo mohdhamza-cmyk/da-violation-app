@@ -1999,7 +1999,21 @@ function withinCacheWindow(r: SheetRow, cutoffMs: number): boolean {
   return isNaN(d.getTime()) ? true : d.getTime() >= cutoffMs; // keep undated rows
 }
 function isRealRow(r: any): boolean {
-  return !!(r && r.Store && r.Store !== "TEST" && r.Store !== "" && r.ID);
+  // Matches the ORIGINAL dashboard filter exactly. It deliberately does NOT
+  // require an ID: older / migrated rows can have a blank ID column, and
+  // requiring one silently hid them from the 7- and 10-day views while today's
+  // rows (which finalize always stamps with an ID) still appeared.
+  return !!(r && r.Store && r.Store !== "TEST" && r.Store !== "");
+}
+
+// The row cache is keyed on ID, so a row with a blank ID cannot be stored.
+// Give those a STABLE synthetic key derived from the slot they represent, so
+// they persist and still de-duplicate correctly against themselves.
+function ensureRowKey(r: any): any {
+  if (r && (r.ID == null || r.ID === "")) {
+    r.ID = "syn-" + norm(r.Store) + "|" + extractDate(r.Date) + "|" + extractHourSlot(r.HourSlot);
+  }
+  return r;
 }
 
 // The server sends compact [[...]] + headers (no repeated JSON keys). Expand to
@@ -2009,7 +2023,7 @@ function rowsFromCompact(headers: string[], rows: any[][]): SheetRow[] {
   return rows.map((arr) => {
     const o: any = {};
     for (let i = 0; i < headers.length; i++) o[headers[i]] = arr[i];
-    return o as SheetRow;
+    return ensureRowKey(o) as SheetRow;
   });
 }
 

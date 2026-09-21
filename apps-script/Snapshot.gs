@@ -297,3 +297,46 @@ function ensureMaintenanceTriggers() {
   buildSnapshot_();
   Logger.log("Installed: purgeOldFiles (daily ~3 AM) + rebuildSnapshot (every 10 min). Snapshot primed.");
 }
+
+// ── DIAGNOSTIC ────────────────────────────────────────────────────────────
+// Run from the editor and read the Execution log. Answers, definitively:
+//   - how many days of data the Current tab actually holds
+//   - whether any rows have a blank ID (those used to be dropped client-side)
+//   - exactly what the snapshot would serve to a device
+// Read-only: changes nothing.
+function diagnoseCurrent() {
+  const sheet = getCurrentSheet();
+  const lastRow = sheet.getLastRow();
+  const lastCol = Math.max(sheet.getLastColumn(), SHEET_HEADERS.length);
+  Logger.log("Current tab: " + (lastRow - 1) + " data rows, " + lastCol + " columns");
+  if (lastRow < 2) {
+    Logger.log("EMPTY -> nothing to serve. Run seedCurrentFromHistory() once.");
+    return;
+  }
+  const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  Logger.log("Headers: " + headers.join(" | "));
+  const dateIdx = headers.indexOf("Date");
+  const idIdx = headers.indexOf("ID");
+
+  const values = sheet.getRange(2, 1, lastRow - 1, lastCol).getValues();
+  const byDate = {};
+  let blankIds = 0;
+  for (let i = 0; i < values.length; i++) {
+    const d = values[i][dateIdx];
+    const key = (d instanceof Date)
+      ? Utilities.formatDate(d, Session.getScriptTimeZone(), "dd MMM yyyy")
+      : String(d);
+    byDate[key] = (byDate[key] || 0) + 1;
+    if (idIdx >= 0 && (values[i][idIdx] === "" || values[i][idIdx] == null)) blankIds++;
+  }
+  const keys = Object.keys(byDate).sort();
+  Logger.log("Distinct dates in Current: " + keys.length);
+  for (let k = 0; k < keys.length; k++) Logger.log("   " + keys[k] + "  ->  " + byDate[keys[k]] + " rows");
+  Logger.log("Rows with a BLANK ID: " + blankIds);
+
+  const snap = buildSnapshot_();
+  Logger.log("Snapshot would serve " + snap.count + " of those rows"
+    + " (cursor=" + snap.cursor + ", gen=" + snap.gen + ")");
+  Logger.log("If 'Distinct dates' is 1, the older data is not in Current -"
+    + " it is in Sheet1 / the weekly tabs, and seedCurrentFromHistory() is needed.");
+}
