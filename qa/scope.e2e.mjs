@@ -125,6 +125,35 @@ try{
     await ctx.close();
   }
 
+  console.log("\n[Q5] a stale cache from an older build self-heals (re-seeds)");
+  { const {page,ctx,calls}=await mkUser(browser);
+    await page.goto("http://localhost:4173/"); await page.waitForTimeout(400);
+    await login(page,"admin","noon@2026");
+    const seeded=await records(page);
+    ok(seeded>0,`first load seeded ${seeded} rows`);
+
+    // Simulate a device still holding the PREVIOUS build's cache: old version
+    // marker, plus a cursor that would otherwise force a delta-only sync.
+    await page.evaluate(()=>{
+      localStorage.setItem("ds_cache_version","1");
+      localStorage.setItem("ds_sync_meta_v1",
+        JSON.stringify({cursor:5,gen:"gen-1",lastSync:Date.now()}));
+    });
+    const before=calls.length;
+    await page.reload(); await page.waitForTimeout(2500);
+    // A reload lands on the Upload tab; go back to the dashboard to read it.
+    await page.getByText("DASHBOARD",{exact:true}).first().click();
+    await page.waitForTimeout(800);
+    const after=calls.slice(before);
+    ok(after.some(c=>c.includes("seed")),
+       "version mismatch forced a full RE-SEED (not a delta that would miss old rows)");
+    const healed=await records(page);
+    ok(healed===seeded,`all rows restored after self-heal (${healed} of ${seeded})`);
+    const v=await page.evaluate(()=>localStorage.getItem("ds_cache_version"));
+    ok(v==="2","cache version updated, so it heals exactly once");
+    await ctx.close();
+  }
+
   console.log("\n[Q4] a force re-sync mutates nothing on the server");
   ok(writes.length===0,`no POST/write requests were made by any refresh (${writes.length})`);
 } finally { await browser.close(); }

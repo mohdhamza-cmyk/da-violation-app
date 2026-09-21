@@ -1925,6 +1925,14 @@ async function idbClearRows(): Promise<void> {
 }
 
 const SYNC_META_KEY = "ds_sync_meta_v1";
+// Bump this whenever the row cache could hold BAD data from an older build.
+// Without it a device is stuck: once a cursor exists every sync is a delta, so
+// rows the previous build wrongly discarded sit BEFORE the cursor and would
+// never be re-fetched - the fix would ship but never reach anyone. A version
+// change wipes the cache and forces one clean re-seed.
+//   v2: the blank-ID filter dropped older rows, emptying the 7/10-day views.
+const CACHE_VERSION = "2";
+const CACHE_VERSION_KEY = "ds_cache_version";
 const CACHE_WINDOW_DAYS = 11; // mirrors WINDOW_DAYS on the server
 const STALE_MS = 30 * 60 * 1000; // foreground-refresh threshold
 
@@ -2058,6 +2066,28 @@ async function getJSONQuiet(url: string): Promise<any | null> {
 
 // Load the cache into memory. Instant, offline-safe, no spinner.
 async function hydrateData(): Promise<void> {
+  // If this build's cache version differs from what the device last wrote, the
+  // stored rows may be incomplete. Drop them and reset the cursor so the next
+  // sync re-seeds the whole window exactly once.
+  let stored: string | null = null;
+  try {
+    stored = localStorage.getItem(CACHE_VERSION_KEY);
+  } catch {}
+  if (stored !== CACHE_VERSION) {
+    try {
+      await idbClearRows();
+    } catch {}
+    DATA.rows = [];
+    DATA.meta = { cursor: 0, gen: "", lastSync: 0 };
+    saveSyncMeta(DATA.meta);
+    try {
+      localStorage.setItem(CACHE_VERSION_KEY, CACHE_VERSION);
+    } catch {}
+    DATA.hydrated = true;
+    emitData();
+    return;
+  }
+
   try {
     const rows = await idbAllRows();
     const cut = cacheCutoffMs();
