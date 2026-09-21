@@ -133,7 +133,7 @@ const SNAP_PREFIX = "snap_v1_";
 const SNAP_TTL_SEC = 21600;              // 6h; the trigger refreshes long before this
 const SNAP_MAX_AGE_MS = 10 * 60 * 1000;  // treat as stale after 10 min
 const SNAP_CHUNK_CHARS = 90000;          // under the 100KB-per-value cap
-const SNAP_MAX_CHUNKS = 24;              // ~2.1MB ceiling; larger ⇒ serve live, don't cache
+const SNAP_MAX_CHUNKS = 24;              // ~2.1MB ceiling; larger => serve live, don't cache
 
 function snapPut_(payload) {
   const json = JSON.stringify(payload);
@@ -354,7 +354,7 @@ function rollCurrentToWeeklyTabs() {
       }
       const toAppend = [];
       entries.forEach(function (e) {
-        moved[e.idx] = true; // this week is processed → row leaves Current either way
+        moved[e.idx] = true; // this week is processed -> row leaves Current either way
         const id = idIdx >= 0 ? String(e.row[idIdx]) : "";
         if (id && existing[id]) return; // already filed by a prior partial run
         toAppend.push(e.row);
@@ -402,7 +402,7 @@ function rollCurrentToWeeklyTabs() {
 // NON-DESTRUCTIVE: the source tab is never touched — verify the weekly tabs,
 // then delete the source yourself if you want.
 function migrateSheet1ToWeeklyTabs() {
-  const WEEKS_PER_RUN = 6;              // small batches → avoids service timeouts
+  const WEEKS_PER_RUN = 6;              // small batches -> avoids service timeouts
   const MAX_MS = 4 * 60 * 1000;         // hard stop well under the 6-min limit
   const startTime = Date.now();
 
@@ -467,7 +467,7 @@ function migrateSheet1ToWeeklyTabs() {
     }
 
     const sh = withRetry(function () { return weekSheet(wk); });
-    // Existing IDs in this week tab → complete a partial week without duplicates.
+    // Existing IDs in this week tab -> complete a partial week without duplicates.
     const existing = {};
     if (idIdx >= 0 && sh.getLastRow() >= 2) {
       const ids = withRetry(function () {
@@ -831,13 +831,13 @@ function doGet(e) {
 
   // ── FAST VERIFICATION: ?check=RECORD_ID ──────────────────────────────
   // Reads ONLY the ID column of the last ~1000 rows — never the whole tab.
-  // The old code ran `sheet.getDataRange().getValues()`, pulling every row ×
+  // The old code ran `sheet.getDataRange().getValues()`, pulling every row x
   // every column on EVERY verification (up to 3 per submission, ~166 stores
   // firing at once). That one line was the main generator of the "Too many
   // scripts running simultaneously" page — which then made this very endpoint
   // fail, marking landed submissions as failed and re-queueing them.
   //
-  // Deliberately NOT served from the snapshot: finalize→check happens within
+  // Deliberately NOT served from the snapshot: finalize->check happens within
   // seconds, and a stale snapshot would report a row that DID land as missing,
   // recreating the exact false-failure loop this is meant to kill.
   if (P.check) {
@@ -1090,8 +1090,8 @@ function testSheet() {
 // 2. Send this WhatsApp message to it: "I allow callmebot to send me messages"
 // 3. You'll receive an API key. Paste it into WHATSAPP_API_KEY below
 // 4. Put your number (with country code, no +) into WHATSAPP_PHONE
-const WHATSAPP_PHONE = "971500000000";        // ← your number, e.g. 9715XXXXXXXX
-const WHATSAPP_API_KEY = "PASTE_YOUR_KEY";    // ← key from CallMeBot
+const WHATSAPP_PHONE = "971500000000";        // <- your number, e.g. 9715XXXXXXXX
+const WHATSAPP_API_KEY = "PASTE_YOUR_KEY";    // <- key from CallMeBot
 
 function sendWhatsApp(message) {
   if (WHATSAPP_API_KEY === "PASTE_YOUR_KEY") {
@@ -1141,7 +1141,7 @@ function sendDailyFlaggedAlert() {
     }
   }
 
-  // Expected slots elapsed so far today (8AM–10PM = 14 slots)
+  // Expected slots elapsed so far today (8AM-10PM = 14 slots)
   const hour = now.getHours();
   let elapsed = 0;
   if (hour >= 8 && hour < 22) elapsed = hour - 8;
@@ -1156,9 +1156,9 @@ function sendDailyFlaggedAlert() {
   }
 
   if (flagged.length === 0) {
-    sendWhatsApp("✅ noon Minutes — All stores meeting 90% adherence as of " + hour + ":00. Great work!");
+    sendWhatsApp("OK: noon Minutes — All stores meeting 90% adherence as of " + hour + ":00. Great work!");
   } else {
-    const msg = "⚠️ noon Minutes — Flagged stores (below 90%) as of " + hour + ":00:\n\n"
+    const msg = "WARNING: noon Minutes — Flagged stores (below 90%) as of " + hour + ":00:\n\n"
       + flagged.slice(0, 30).join("\n")
       + (flagged.length > 30 ? "\n\n…and " + (flagged.length - 30) + " more" : "");
     sendWhatsApp(msg);
